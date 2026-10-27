@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CDC Privacy</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Inter, Segoe UI, sans-serif; background: #0b1220; width: 1280px; height: 800px; overflow: hidden; }
+    header { display: flex; justify-content: space-between; align-items: center; background: #0b1f3a; color: #fff; border-bottom: 3px solid #f59e0b; padding: 10px 16px; }
+    .badge { background: #f59e0b; color: #0b1f3a; font-weight: 800; font-size: 11px; padding: 3px 7px; border-radius: 4px; }
+    .dim { filter: blur(1px) brightness(.55); }
+    .card { position: absolute; left: 50%; top: 52%; transform: translate(-50%,-50%); width: 560px; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,.35); }
+    .card-h { background: #12305a; color: #fff; padding: 14px 18px; font-weight: 800; }
+    .card-b { padding: 18px; color: #334155; font-size: 14px; line-height: 1.5; }
+    ul { margin: 12px 0 14px 18px; }
+    .ok { background: #ecfdf5; border: 1px solid #a7f3d0; color: #064e3b; padding: 12px; border-radius: 8px; font-size: 13px; }
+    .actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 18px; background: #f8fafc; }
+    .ghost { border: 1px solid #cbd5e1; background: #fff; padding: 8px 12px; border-radius: 6px; font-weight: 700; }
+    .primary { border: 0; background: #0b1f3a; color: #fff; padding: 8px 12px; border-radius: 6px; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><span class="badge">CDC</span><span style="margin-left:8px;font-weight:700">Placement 2026–27</span></div>
+    <div style="color:#94a3b8;font-size:12px">AI Sync: Ask</div>
+  </header>
+  <div class="dim" style="padding:40px;color:#94a3b8">Roles and notices stay usable without sending data to any AI server.</div>
+  <div class="card">
+    <div class="card-h">Permission for optional AI CV matching</div>
+    <div class="card-b">
+      Smart Apply is optional. If you allow it, the portal may send only:
+      <ul>
+        <li>Your 3 CDC resume PDFs (CV1, CV2, CV3)</li>
+        <li>Company rows, roles, and job descriptions</li>
+        <li>Placement notices</li>
+      </ul>
+      <div class="ok"><b>Never sent:</b> roll number, ERP password, security answers, OTP, or ERP session cookies. Login and apply stay in your browser and go only to erp.iitkgp.ac.in.</div>
+    </div>
+    <div class="actions">
+      <button class="ghost">Do not send data</button>
+      <button class="primary">Allow & enable Smart CV Match</button>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>How the CDC Client Bridge works</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Inter, Segoe UI, sans-serif; background: #0b1f3a; color: #fff; width: 1280px; height: 800px; overflow: hidden; padding: 48px 64px; }
+    .badge { display: inline-block; background: #f59e0b; color: #0b1f3a; font-weight: 800; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+    h1 { font-size: 40px; margin: 16px 0 10px; }
+    p.lead { color: #cbd5e1; font-size: 18px; max-width: 820px; margin-bottom: 36px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+    .card { background: #12305a; border: 1px solid #1e4a7a; border-radius: 14px; padding: 22px; min-height: 280px; }
+    .n { width: 32px; height: 32px; border-radius: 999px; background: #f59e0b; color: #0b1f3a; font-weight: 800; display: flex; align-items: center; justify-content: center; margin-bottom: 14px; }
+    h2 { font-size: 20px; margin-bottom: 10px; }
+    .card p { color: #cbd5e1; line-height: 1.5; font-size: 15px; }
+    .foot { margin-top: 36px; color: #93c5fd; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <span class="badge">CDC CLIENT BRIDGE</span>
+  <h1>Your browser talks to ERP. Nothing else does.</h1>
+  <p class="lead">This extension is a local bridge for the IIT Kharagpur CDC Placement Portal. It uses your existing ERP cookies so the portal can load roles, notices, and JDs without sending your password to any third-party server.</p>
+  <div class="grid">
+    <div class="card"><div class="n">1</div><h2>Install the bridge</h2><p>Add this extension in Chrome. It only activates on the CDC Placement Portal and only contacts https://erp.iitkgp.ac.in.</p></div>
+    <div class="card"><div class="n">2</div><h2>Sign in locally</h2><p>Enter roll number, password, and security answers in the portal. Those secrets stay in this browser. OTP still comes from official ERP email.</p></div>
+    <div class="card"><div class="n">3</div><h2>Apply from the portal</h2><p>Browse open roles, read notices, open JDs, and apply or cancel with CV1 / CV2 / CV3. ERP session cookies never leave Chrome.</p></div>
+  </div>
+  <p class="foot">Unofficial student tool. Not affiliated with CDC, ERP, or IIT Kharagpur administration.</p>
+</body>
+</html>
