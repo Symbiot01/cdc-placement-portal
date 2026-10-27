@@ -14,7 +14,7 @@ Needed to read and clear ERP session cookies for https://erp.iitkgp.ac.in so the
 **Host permission https://erp.iitkgp.ac.in/**
 Needed to send login, OTP, role, notice, JD, apply, and cancel requests only to official ERP. The extension rejects any other host.
 
-**Content scripts on localhost / 127.0.0.1 / 34.100.133.60 / ewrpkgp.in**
+**Content scripts on localhost / 127.0.0.1 / ewrpkgp.in**
 Needed so the CDC Placement Portal page can send messages to the extension. Public use is limited to https://ewrpkgp.in and https://www.ewrpkgp.in. The background script rejects every other site.
 
 ## Data usage

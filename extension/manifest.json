@@ -19,8 +19,6 @@
       "matches": [
         "http://localhost/*",
         "http://127.0.0.1/*",
-        "http://34.100.133.60/*",
-        "https://34.100.133.60/*",
         "https://ewrpkgp.in/*",
         "https://www.ewrpkgp.in/*"
       ],

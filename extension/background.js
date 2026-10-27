@@ -1,7 +1,6 @@
 const ERP_ORIGIN = "https://erp.iitkgp.ac.in";
 
 const LOCAL_SENDER_HOSTS = new Set(["localhost", "127.0.0.1"]);
-const LEGACY_IP_HOSTS = new Set(["34.100.133.60"]);
 const PUBLIC_HTTPS_HOSTS = new Set(["ewrpkgp.in", "www.ewrpkgp.in"]);
 
 function assertAllowedSender(sender) {
@@ -18,9 +17,8 @@ function assertAllowedSender(sender) {
   const host = parsed.hostname;
   const proto = parsed.protocol;
   const isLocal = (proto === "http:" || proto === "https:") && LOCAL_SENDER_HOSTS.has(host);
-  const isLegacyIp = (proto === "http:" || proto === "https:") && LEGACY_IP_HOSTS.has(host);
   const isPublicHttps = proto === "https:" && PUBLIC_HTTPS_HOSTS.has(host);
-  if (!isLocal && !isLegacyIp && !isPublicHttps) {
+  if (!isLocal && !isPublicHttps) {
     throw new Error(`Blocked bridge message from untrusted origin: ${parsed.origin}`);
   }
 }
