@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "IIT KGP ERP — CDC Client Bridge",
+  "version": "1.0.3",
+  "description": "Local browser bridge allowing the CDC Placement Portal to talk directly to https://erp.iitkgp.ac.in using your browser cookies.",
+  "icons": {
+    "16": "icon-16.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "permissions": ["cookies"],
+  "host_permissions": ["https://erp.iitkgp.ac.in/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "http://34.100.133.60/*",
+        "https://34.100.133.60/*",
+        "https://ewrpkgp.in/*",
+        "https://www.ewrpkgp.in/*"
+      ],
+      "js": ["content-bridge.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
