@@ -471,18 +471,34 @@ class ClientErpRunner {
       email_otp: cleanOtp,
     });
 
-    if (finalUrl.includes("login.htm")) {
-      throw new Error("Login stayed on login.htm — the OTP was invalid or expired");
+    let authPath = finalUrl;
+    try {
+      authPath = new URL(finalUrl).pathname;
+    } catch {
+      authPath = finalUrl;
+    }
+    const authRejected = authPath.endsWith("login.htm") || authPath.endsWith("auth.htm");
+    if (authRejected) {
+      throw new Error(
+        "Login stayed on the ERP login page — the OTP was invalid or expired. Send a new OTP and try again."
+      );
     }
 
     await this.openPlacementSession();
     this.state.stage = "authenticated";
     this.state.rollno = profile.rollno.trim();
 
-    const [companies, notices] = await Promise.all([
-      this.fetchCompanies(),
-      this.fetchNotices(50, true),
-    ]);
+    const companies = await this.fetchCompanies();
+    let notices: PlacementNotice[] = [];
+    try {
+      notices = await this.fetchNotices(50, true);
+    } catch {
+      try {
+        notices = await this.fetchNotices(50, true);
+      } catch {
+        notices = [];
+      }
+    }
 
     return {
       rollno: this.state.rollno,

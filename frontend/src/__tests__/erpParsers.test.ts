@@ -9,6 +9,7 @@ import {
   parseJnfHtml,
   parseJqgridXml,
   parseNoticeRow,
+  splitGluedUrl,
 } from "../lib/erpParsers";
 
 describe("decideSecurityAnswer", () => {
@@ -123,6 +124,37 @@ describe("ERP XML & HTML parsers", () => {
     const parenRunOn =
       "1. POCKET FM (Profiles: Member of Technical Staff, Management Trainee)Interested and eligible students are advised to apply.";
     expect(prettifyNoticeText(parenRunOn)).toContain("Management Trainee)\nInterested and eligible");
+
+    // Glued forms.gle shortlink followed directly by "All the eligible students..."
+    const ycpAuctus =
+      "Please note that all the students who have applied for the Analyst Role for YCP Auctus are required to fill the following additional details form by 4:00 PM, 29th October, 2026. Link: https://forms.gle/fA5w7bkMxYGXCeG19All the eligible students are advised to fill the form within the given deadline. No further extensions will be given CDC, IIT Kharagpur";
+    const ycpPretty = prettifyNoticeText(ycpAuctus);
+    expect(ycpPretty).toContain("Link: https://forms.gle/fA5w7bkMxYGXCeG19\nAll the eligible students");
+    expect(ycpPretty).not.toContain("fA5w7bkMxYGXCeG19All");
+
+    // Glued Google Meet, Zoom, and Google Docs links
+    expect(splitGluedUrl("https://meet.google.com/abc-defg-hijPlease").url).toBe(
+      "https://meet.google.com/abc-defg-hij"
+    );
+    expect(splitGluedUrl("https://us06web.zoom.us/j/83367015087Interested").url).toBe(
+      "https://us06web.zoom.us/j/83367015087"
+    );
+    expect(
+      splitGluedUrl("https://docs.google.com/forms/d/e/1FAIpQLSd/viewformKindly").url
+    ).toBe("https://docs.google.com/forms/d/e/1FAIpQLSd/viewform");
+    expect(splitGluedUrl("https://example.com/register?id=42Students").url).toBe(
+      "https://example.com/register?id=42"
+    );
+    // Preserves balanced parentheses in URLs while stripping outer closing paren
+    expect(splitGluedUrl("https://en.wikipedia.org/wiki/C_(programming_language)).")).toEqual({
+      url: "https://en.wikipedia.org/wiki/C_(programming_language)",
+      tail: ").",
+    });
+  });
+
+  it("handles truncated empty jqGrid <rows> stubs without throwing", () => {
+    const stub = '<?xml version="1.0" encoding="UTF-8"?><rows><page>1</page>';
+    expect(parseJqgridXml(stub)).toEqual([]);
   });
 
   it("extracts applied CV number and JD fields from TPJNFView.jsp HTML", () => {
