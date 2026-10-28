@@ -180,10 +180,181 @@ export function extractHiddenInput(page: string, name: string): string {
   return extractAttr(tagMatch[0], "value");
 }
 
+const GLUED_PROSE_STARTERS = new Set([
+  "all",
+  "interested",
+  "eligible",
+  "kindly",
+  "please",
+  "students",
+  "student",
+  "candidates",
+  "candidate",
+  "shortlisted",
+  "selected",
+  "the",
+  "this",
+  "those",
+  "only",
+  "for",
+  "if",
+  "in",
+  "on",
+  "by",
+  "at",
+  "to",
+  "from",
+  "with",
+  "note",
+  "deadline",
+  "venue",
+  "mode",
+  "date",
+  "time",
+  "reporting",
+  "attendance",
+  "no",
+  "any",
+  "further",
+  "fill",
+  "submit",
+  "join",
+  "register",
+  "apply",
+  "check",
+  "refer",
+  "visit",
+  "contact",
+  "poc",
+  "cdc",
+  "pfa",
+  "pfb",
+  "mandatory",
+  "compulsory",
+  "it",
+  "we",
+  "you",
+  "they",
+  "who",
+  "whose",
+  "each",
+  "every",
+  "both",
+  "before",
+  "after",
+  "within",
+  "during",
+  "until",
+  "till",
+  "as",
+  "per",
+]);
+
+/**
+ * Split a greedy URL match into `{ url, tail }` when CDC notice prose is glued
+ * directly onto the end of a URL (with no whitespace after `</a>` or `</p>`),
+ * or when trailing punctuation / unbalanced closing brackets wrap the URL.
+ */
+export function splitGluedUrl(rawUrl: string): { url: string; tail: string } {
+  let working = rawUrl || "";
+  let suffix = "";
+
+  // 1) Strip trailing sentence punctuation and unbalanced closing brackets/parens/quotes.
+  while (working.length > 0) {
+    const last = working[working.length - 1];
+    if (/[.,;:!?'"]/.test(last)) {
+      suffix = last + suffix;
+      working = working.slice(0, -1);
+      continue;
+    }
+    if (last === ")") {
+      const opens = (working.match(/\(/g) || []).length;
+      const closes = (working.match(/\)/g) || []).length;
+      if (closes > opens) {
+        suffix = last + suffix;
+        working = working.slice(0, -1);
+        continue;
+      }
+    }
+    if (last === "]") {
+      const opens = (working.match(/\[/g) || []).length;
+      const closes = (working.match(/\]/g) || []).length;
+      if (closes > opens) {
+        suffix = last + suffix;
+        working = working.slice(0, -1);
+        continue;
+      }
+    }
+    break;
+  }
+
+  const finish = (urlPart: string, extraTail: string) => {
+    // Re-strip any trailing punctuation exposed after peeling off glued prose
+    let cleanUrl = urlPart;
+    let punct = "";
+    while (cleanUrl.length > 0 && /[.,;:!?]/.test(cleanUrl[cleanUrl.length - 1])) {
+      punct = cleanUrl[cleanUrl.length - 1] + punct;
+      cleanUrl = cleanUrl.slice(0, -1);
+    }
+    return {
+      url: cleanUrl,
+      tail: `${punct}${extraTail ? (punct ? ` ${extraTail}` : `\n${extraTail}`) : ""}${suffix}`,
+    };
+  };
+
+  // 2) Exact fixed-length / structural URL patterns common in CDC notices:
+  //    - Google Forms shortlinks: https://forms.gle/<17 base62 chars>
+  const formsGleMatch = working.match(/^(https?:\/\/forms\.gle\/[A-Za-z0-9_-]{17})([A-Z][A-Za-z]*)$/);
+  if (formsGleMatch) {
+    return finish(formsGleMatch[1], formsGleMatch[2]);
+  }
+
+  //    - Google Meet links: https://meet.google.com/xxx-xxxx-xxx
+  const meetMatch = working.match(
+    /^(https?:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3})([A-Za-z].*)$/i
+  );
+  if (meetMatch && !meetMatch[2].startsWith("?")) {
+    return finish(meetMatch[1], meetMatch[2]);
+  }
+
+  //    - Zoom numeric meeting links without query string: https://*.zoom.us/j/<9-11 digits>
+  const zoomNumericMatch = working.match(
+    /^(https?:\/\/(?:[A-Za-z0-9-]+\.)?zoom\.us\/[jw]\/\d{9,11})([A-Za-z].*)$/i
+  );
+  if (zoomNumericMatch) {
+    return finish(zoomNumericMatch[1], zoomNumericMatch[2]);
+  }
+
+  //    - Google Docs/Forms/Sheets/Drive view/edit suffix glued to prose:
+  //      .../viewform, .../edit, .../view, .../usp=sharing, .../usp=sf_link
+  const gdocsEndMatch = working.match(
+    /^(https?:\/\/(?:docs|drive)\.google\.com\/[^\s]*?(?:viewform|usp=sharing|usp=sf_link|\/edit|\/view))([A-Z][a-z].*)$/
+  );
+  if (gdocsEndMatch) {
+    return finish(gdocsEndMatch[1], gdocsEndMatch[2]);
+  }
+
+  // 3) General heuristic: if the URL ends with a TitleCase word (`[A-Z][a-z]{1,14}`)
+  //    that is a common prose starter ("All", "Interested", "Please", "Kindly",
+  //    "Students", "The", "Note", "No", "For", "Deadline", etc.) preceded by a
+  //    digit, punctuation, `/`, or lowercase letter at the end of a path/query token.
+  const trailingWordMatch = working.match(/^(https?:\/\/.+?[0-9a-z/_=-])([A-Z][a-z]{1,14})$/);
+  if (trailingWordMatch) {
+    const candidateWord = trailingWordMatch[2].toLowerCase();
+    if (GLUED_PROSE_STARTERS.has(candidateWord)) {
+      return finish(trailingWordMatch[1], trailingWordMatch[2]);
+    }
+  }
+
+  return { url: working, tail: suffix };
+}
+
 export function noticeTextFromHtml(value: string): string {
   if (!value) return "";
   let text = decodeHtmlEntities(value);
   text = text
+    // Ensure closing anchors / spans after URLs don't glue to following prose
+    .replace(/<\/a\s*>/gi, " ")
     .replace(/<(?:b|strong)[^>]*>([\s\S]*?)<\/(?:b|strong)>/gi, "**$1**")
     .replace(/<(?:i|em)[^>]*>([\s\S]*?)<\/(?:i|em)>/gi, "*$1*")
     .replace(/<br\s*\/?>/gi, "\n")
@@ -211,9 +382,16 @@ export function prettifyNoticeText(raw: string): string {
     "Registration Link for Bachelor Courses",
     "Registration Link",
     "Registration link",
+    "Additional Details Form",
+    "Application Link",
+    "Assessment Link",
+    "Test Link",
     "Join link",
     "Form Link",
+    "Form link",
     "Google Form",
+    "Meeting link",
+    "Meeting Link",
     "Webinar number",
     "Webinar password",
     "Session number",
@@ -234,19 +412,17 @@ export function prettifyNoticeText(raw: string): string {
   const labelAlt = labels.map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
   text = text.replace(new RegExp(`(?<![\\nA-Za-z])((?:${labelAlt})\\s*[:：])`, "gi"), "\n$1");
 
-  // 2) Protect URLs from sentence-splitting (domains contain ".us" etc.).
+  // 2) Protect URLs from sentence-splitting (domains contain ".us" etc.) and
+  //    peel off any CDC prose glued directly to the end of the URL.
   const urls: string[] = [];
-  text = text.replace(/https?:\/\/[^\s<>"]+/gi, (url) => {
-    const cleaned = url.replace(/[.,;:!?)]+$/g, "");
-    const trail = url.slice(cleaned.length);
-    const token = `⟦URL${urls.length}⟧`;
-    urls.push(cleaned);
-    return trail ? `${token}${trail}` : token;
+  text = text.replace(/(?<![\w/:])((?:meet\.google\.com|forms\.gle)\/[^\s<>"]+)/gi, (_m, path) => {
+    return `https://${path}`;
   });
-  text = text.replace(/(?<![\w/:])((?:meet\.google\.com|forms\.gle)\/[^\s]*)/gi, (_m, path) => {
+  text = text.replace(/https?:\/\/[^\s<>"]+/gi, (rawUrl) => {
+    const { url, tail } = splitGluedUrl(rawUrl);
     const token = `⟦URL${urls.length}⟧`;
-    urls.push(`https://${path}`);
-    return token;
+    urls.push(url);
+    return tail ? `${token}${tail}` : token;
   });
 
   // Year jammed into a numbered item: "20261. [PPT" → "2026\n1. [PPT"
@@ -254,6 +430,9 @@ export function prettifyNoticeText(raw: string): string {
 
   // URL token glued to preceding text → own line
   text = text.replace(/([^\s\n])(⟦URL\d+⟧)/g, "$1\n$2");
+
+  // URL token followed immediately by a sentence / capital word on the same line → newline
+  text = text.replace(/(⟦URL\d+⟧)[ \t]+([A-Z][a-z]{1,14}\b)/g, "$1\n$2");
 
   // Numbered list item starting mid-line (must NOT be preceded by a digit, or
   // "2026. " gets split into "20" + "26. " and rendered as an <ol>).
@@ -298,7 +477,10 @@ export function parseJqgridXml(payload: string): string[][] {
   if (start < 0) {
     throw new Error("ERP response did not contain jqGrid <rows> XML");
   }
-  const xmlBody = trimmed.slice(start);
+  let xmlBody = trimmed.slice(start);
+  if (!xmlBody.includes("</rows>") && !/<row\b/i.test(xmlBody)) {
+    return [];
+  }
   const parser = new DOMParser();
   const doc = parser.parseFromString(xmlBody, "application/xml");
   if (doc.querySelector("parsererror")) {

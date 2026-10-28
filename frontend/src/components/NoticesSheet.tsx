@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Paperclip } from "lucide-react";
-import { PlacementNotice } from "../lib/erpParsers";
+import { PlacementNotice, splitGluedUrl } from "../lib/erpParsers";
 
 interface NoticesSheetProps {
   notices: PlacementNotice[];
@@ -11,7 +11,7 @@ interface NoticesSheetProps {
 }
 
 const LABEL_LINE =
-  /^(Join link|Link|Note|POC|Deadline|Venue|Meeting ID|Passcode|Password|Webinar number|Webinar password|Session number|Session password|Registration Link(?: for [^:]+)?|Registration link|Form Link|Google Form|Reporting Time|Mode|PFA|PFB)\s*[:：]\s*(.*)$/i;
+  /^(Join link|Link|Note|POC|Deadline|Venue|Meeting ID|Passcode|Password|Webinar number|Webinar password|Session number|Session password|Registration Link(?: for [^:]+)?|Registration link|Additional Details Form|Application Link|Assessment Link|Test Link|Form Link|Form link|Google Form|Meeting link|Meeting Link|Reporting Time|Mode|PFA|PFB)\s*[:：]\s*(.*)$/i;
 
 function linkifySegment(text: string, keyPrefix: string): React.ReactNode[] {
   const urlRe = /(https?:\/\/[^\s<>"]+)/g;
@@ -20,7 +20,7 @@ function linkifySegment(text: string, keyPrefix: string): React.ReactNode[] {
   let m: RegExpExecArray | null;
   while ((m = urlRe.exec(text)) !== null) {
     if (m.index > last) parts.push(text.slice(last, m.index));
-    const url = m[0];
+    const { url, tail } = splitGluedUrl(m[0]);
     parts.push(
       <a
         key={`${keyPrefix}-u-${m.index}`}
@@ -33,6 +33,7 @@ function linkifySegment(text: string, keyPrefix: string): React.ReactNode[] {
         {url}
       </a>
     );
+    if (tail) parts.push(tail.replace(/^\n/, " "));
     last = urlRe.lastIndex;
   }
   if (last < text.length) parts.push(text.slice(last));
@@ -51,18 +52,20 @@ function renderInlineFormatting(line: string, keyPrefix: string): React.ReactNod
     }
     const token = match[0];
     if (token.startsWith("http://") || token.startsWith("https://")) {
+      const { url, tail } = splitGluedUrl(token);
       parts.push(
         <a
           key={`${keyPrefix}-url-${match.index}`}
-          href={token}
+          href={url}
           target="_blank"
           rel="noopener noreferrer"
           className="inline break-all font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900"
           onClick={(e) => e.stopPropagation()}
         >
-          {token}
+          {url}
         </a>
       );
+      if (tail) parts.push(tail.replace(/^\n/, " "));
     } else if (token.startsWith("**") && token.endsWith("**")) {
       parts.push(
         <strong key={`${keyPrefix}-b-${match.index}`} className="font-bold text-slate-900">
