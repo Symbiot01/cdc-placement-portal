@@ -22,6 +22,16 @@ const ERP_HOST = "https://erp.iitkgp.ac.in";
 const SOURCE_PAGE = "ERP_CDC_PAGE";
 const SOURCE_EXT = "ERP_CDC_EXT";
 
+export const ERP_EXTENSION_STORE_URL =
+  "https://chromewebstore.google.com/detail/ibcippekdchapicjboimhoaipghjplfk";
+export const MIN_BRIDGE_VERSION = "1.0.4";
+const BRIDGE_PROBE_TIMEOUT_MS = 2000;
+
+export type ExtensionBridgeSnapshot = {
+  status: "checking" | "missing" | "outdated" | "connected";
+  version: string | null;
+};
+
 export interface BridgeFetchOptions {
   url: string;
   method?: "GET" | "POST";
@@ -69,7 +79,7 @@ function defaultWindowTransport(
       window.removeEventListener("message", onMessage);
       reject(
         new Error(
-          "ERP Companion Extension bridge did not respond. Load the unpacked extension from ./extension in chrome://extensions."
+          "ERP bridge extension did not respond. Install it from the Chrome Web Store, allow it on this site, and reload."
         )
       );
     }, 35000);
@@ -108,20 +118,86 @@ async function sendBridgeMessage(
   return transport(action, payload);
 }
 
-export async function isExtensionBridgeAvailable(): Promise<boolean> {
-  if (customTransport) return true;
-  if (
-    typeof document !== "undefined" &&
-    document.documentElement.getAttribute("data-erp-cdc-bridge")
-  ) {
-    return true;
+export function isVersionAtLeast(current: string, minimum: string): boolean {
+  const parse = (raw: string): number[] | null => {
+    if (!/^\d+(\.\d+){0,3}$/.test(raw)) return null;
+    return raw.split(".").map((part) => Number(part));
+  };
+  const left = parse(current);
+  const right = parse(minimum);
+  if (!left || !right) return false;
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i++) {
+    const delta = (left[i] ?? 0) - (right[i] ?? 0);
+    if (delta !== 0) return delta > 0;
+  }
+  return true;
+}
+
+function probeExtensionPing(timeoutMs: number): Promise<{ version: string | null }> {
+  return new Promise((resolve, reject) => {
+    const id = `erp_ping_${Date.now()}_${++requestCounter}`;
+    const timer = window.setTimeout(() => {
+      window.removeEventListener("message", onMessage);
+      reject(new Error("ERP bridge probe timed out"));
+    }, timeoutMs);
+
+    function onMessage(event: MessageEvent) {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.source !== SOURCE_EXT || data.id !== id) return;
+      window.clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+      if (!data.ok) {
+        reject(new Error(typeof data.error === "string" ? data.error : "ERP bridge probe failed"));
+        return;
+      }
+      const rawVersion = typeof data.version === "string" ? data.version.trim() : "";
+      resolve({
+        version: /^\d+\.\d+\.\d+$/.test(rawVersion) ? rawVersion : null,
+      });
+    }
+
+    window.addEventListener("message", onMessage);
+    window.postMessage(
+      {
+        source: SOURCE_PAGE,
+        id,
+        action: "PING",
+      },
+      window.location.origin
+    );
+  });
+}
+
+export function classifyBridgePing(
+  ok: boolean,
+  version: string | null
+): Exclude<ExtensionBridgeSnapshot, { status: "checking" }> {
+  if (!ok) return { status: "missing", version: null };
+  if (version && isVersionAtLeast(version, MIN_BRIDGE_VERSION)) {
+    return { status: "connected", version };
+  }
+  return { status: "outdated", version };
+}
+
+export async function readExtensionBridge(): Promise<
+  Exclude<ExtensionBridgeSnapshot, { status: "checking" }>
+> {
+  if (customTransport) {
+    return { status: "connected", version: MIN_BRIDGE_VERSION };
   }
   try {
-    await sendBridgeMessage("PING");
-    return true;
+    const { version } = await probeExtensionPing(BRIDGE_PROBE_TIMEOUT_MS);
+    return classifyBridgePing(true, version);
   } catch {
-    return false;
+    return { status: "missing", version: null };
   }
+}
+
+export async function isExtensionBridgeAvailable(): Promise<boolean> {
+  const bridge = await readExtensionBridge();
+  return bridge.status === "connected";
 }
 
 async function erpFetchText(

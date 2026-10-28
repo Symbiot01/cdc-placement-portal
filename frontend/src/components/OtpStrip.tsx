@@ -8,7 +8,7 @@ interface OtpStripProps {
   rollno: string;
   sendingOtp: boolean;
   verifyingOtp: boolean;
-  extensionReady: boolean;
+  bridgeReady: boolean;
   onSetupLogin: () => void;
   onSendOtp: () => void;
   onVerifyOtp: (otp: string) => void;
@@ -21,7 +21,7 @@ export const OtpStrip: React.FC<OtpStripProps> = ({
   rollno,
   sendingOtp,
   verifyingOtp,
-  extensionReady,
+  bridgeReady,
   onSetupLogin,
   onSendOtp,
   onVerifyOtp,
@@ -42,11 +42,6 @@ export const OtpStrip: React.FC<OtpStripProps> = ({
   return (
     <section className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-1.5">
       <div className="flex items-center gap-2 text-xs text-slate-600">
-        {!extensionReady && (
-          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-900">
-            Extension bridge required for direct ERP calls
-          </span>
-        )}
         <span>
           {!hasSavedLogin
             ? "Set up login: fetch all 3 ERP security questions, then send OTP."
@@ -61,7 +56,8 @@ export const OtpStrip: React.FC<OtpStripProps> = ({
           <button
             type="button"
             onClick={onSetupLogin}
-            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-bold text-slate-800 hover:bg-slate-50 cursor-pointer"
+            disabled={!bridgeReady}
+            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-bold text-slate-800 hover:bg-slate-50 disabled:opacity-50 cursor-pointer"
           >
             <KeyRound className="h-3.5 w-3.5" />
             Set up login
@@ -71,7 +67,7 @@ export const OtpStrip: React.FC<OtpStripProps> = ({
         <button
           type="button"
           onClick={onSendOtp}
-          disabled={!hasSavedLogin || sendingOtp}
+          disabled={!bridgeReady || !hasSavedLogin || sendingOtp}
           className="inline-flex items-center gap-1 rounded bg-blue-700 px-2.5 py-1 text-xs font-bold text-white hover:bg-blue-800 disabled:opacity-50 cursor-pointer"
         >
           <Mail className="h-3.5 w-3.5" />
@@ -92,7 +88,7 @@ export const OtpStrip: React.FC<OtpStripProps> = ({
           />
           <button
             type="submit"
-            disabled={verifyingOtp}
+            disabled={!bridgeReady || verifyingOtp}
             className="inline-flex items-center gap-1 rounded bg-amber-500 px-2.5 py-1 text-xs font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50 cursor-pointer"
           >
             <Send className="h-3.5 w-3.5" />

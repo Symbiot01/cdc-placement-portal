@@ -3,6 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { X, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { LoginProfile, SecuritySlot, normalizeQuestion } from "../lib/erpParsers";
+import { ERP_EXTENSION_STORE_URL } from "../lib/erpBridge";
 import { loadRememberSecretsPreference, padSlots } from "../lib/storage";
 
 interface LoginModalProps {
@@ -11,6 +12,7 @@ interface LoginModalProps {
   initialProfile: LoginProfile;
   onFetchQuestions: (rollno: string) => Promise<string[]>;
   onSaveProfile: (profile: LoginProfile, rememberSecrets: boolean) => void;
+  bridgeReady: boolean;
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({
@@ -19,6 +21,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   initialProfile,
   onFetchQuestions,
   onSaveProfile,
+  bridgeReady,
 }) => {
   const [rollno, setRollno] = useState(initialProfile.rollno);
   const [password, setPassword] = useState(initialProfile.password);
@@ -157,7 +160,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 <button
                   type="button"
                   onClick={handleFetch}
-                  disabled={fetching}
+                  disabled={!bridgeReady || fetching}
                   className="inline-flex items-center gap-1 rounded border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs font-bold text-slate-800 hover:bg-slate-100 disabled:opacity-50 cursor-pointer"
                 >
                   <RefreshCw className={`h-3.5 w-3.5 ${fetching ? "animate-spin" : ""}`} />
@@ -177,6 +180,21 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 className="rounded border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-900"
               />
             </label>
+
+            {!bridgeReady && (
+              <p className="text-xs leading-relaxed text-amber-900">
+                Fetch questions needs the ERP bridge.{" "}
+                <a
+                  href={ERP_EXTENSION_STORE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-bold underline"
+                >
+                  Install or update it
+                </a>
+                , allow it on this site, then reload.
+              </p>
+            )}
 
             <p className="text-xs leading-relaxed text-slate-600">
               ERP has three security questions. Uncheck <strong>Use</strong> on a wrong one — login

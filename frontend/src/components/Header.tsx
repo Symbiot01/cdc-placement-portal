@@ -1,11 +1,13 @@
 import React from "react";
 import { FileText, KeyRound, LogOut, RefreshCw, ShieldCheck } from "lucide-react";
 import { CvNumber } from "../lib/erpParsers";
+import { ERP_EXTENSION_STORE_URL, type ExtensionBridgeSnapshot } from "../lib/erpBridge";
 import type { CvDiffSummary } from "../lib/matcherApi";
 
 interface HeaderProps {
   rollno: string;
   stage: "uninitialized" | "otp_sent" | "authenticated";
+  bridge: ExtensionBridgeSnapshot;
   hasSavedLogin: boolean;
   serverConsent: boolean | null;
   isRefreshing: boolean;
@@ -20,6 +22,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   rollno,
   stage,
+  bridge,
   hasSavedLogin,
   serverConsent,
   isRefreshing,
@@ -59,6 +62,25 @@ export const Header: React.FC<HeaderProps> = ({
         >
           {isAuthenticated ? "On" : stage === "otp_sent" ? "OTP" : "Off"}
         </span>
+
+        {bridge.status === "connected" ? (
+          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase text-emerald-800">
+            Extension {bridge.version}
+          </span>
+        ) : bridge.status === "checking" ? (
+          <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-700">
+            Extension…
+          </span>
+        ) : (
+          <a
+            href={ERP_EXTENSION_STORE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase text-amber-900 hover:bg-amber-200"
+          >
+            {bridge.status === "outdated" ? "Update extension" : "Install extension"}
+          </a>
+        )}
 
         {isAuthenticated && (
           <div className="flex items-center gap-1">
