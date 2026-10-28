@@ -2,7 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { toast } from "sonner";
 import { CompanyRole, CvNumber, JnfDetails, LoginProfile, PlacementNotice } from "./lib/erpParsers";
-import { erpClient, isExtensionBridgeAvailable } from "./lib/erpBridge";
+import {
+  erpClient,
+  ExtensionBridgeSnapshot,
+  readExtensionBridge,
+} from "./lib/erpBridge";
 import {
   CvDiffSummary,
   RoleMatchRecommendation,
@@ -26,6 +30,7 @@ import {
   saveServerDataConsent,
 } from "./lib/storage";
 import { Header } from "./components/Header";
+import { ExtensionStatusBanner } from "./components/ExtensionStatusBanner";
 import { OtpStrip } from "./components/OtpStrip";
 import { LoginModal } from "./components/LoginModal";
 import { DataConsentModal } from "./components/DataConsentModal";
@@ -38,7 +43,10 @@ export const App: React.FC = () => {
   const [stage, setStage] = useState<"uninitialized" | "otp_sent" | "authenticated">(
     "uninitialized"
   );
-  const [extensionReady, setExtensionReady] = useState(true);
+  const [bridge, setBridge] = useState<ExtensionBridgeSnapshot>({
+    status: "checking",
+    version: null,
+  });
   const [sendingOtp, setSendingOtp] = useState(false);
   const [verifyingOtp, setVerifyingOtp] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -74,7 +82,43 @@ export const App: React.FC = () => {
   const [jdRecLoading, setJdRecLoading] = useState(false);
 
   useEffect(() => {
-    isExtensionBridgeAvailable().then(setExtensionReady);
+    let cancelled = false;
+    let timer = 0;
+    let inflight = false;
+
+    const schedule = (delay: number) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        void run();
+      }, delay);
+    };
+
+    const run = async () => {
+      if (cancelled || inflight) return;
+      inflight = true;
+      try {
+        const next = await readExtensionBridge();
+        if (!cancelled) {
+          setBridge(next);
+          schedule(next.status === "connected" ? 8000 : 2500);
+        }
+      } finally {
+        inflight = false;
+      }
+    };
+
+    void run();
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      window.clearTimeout(timer);
+      void run();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
 
   // Laptop breakpoint: show roles + notices together (same page).
@@ -331,6 +375,10 @@ export const App: React.FC = () => {
   );
 
   const handleSendOtp = async () => {
+    if (bridge.status !== "connected") {
+      toast.error("Install or update the ERP bridge extension, then reload this page.");
+      return;
+    }
     if (!hasUsableLoginProfile(profile)) {
       setLoginModalOpen(true);
       return;
@@ -352,6 +400,10 @@ export const App: React.FC = () => {
   };
 
   const handleVerifyOtp = async (otp: string) => {
+    if (bridge.status !== "connected") {
+      toast.error("Install or update the ERP bridge extension, then reload this page.");
+      return;
+    }
     setVerifyingOtp(true);
     try {
       const res = await erpClient.verifyOtpAndOpenCdc(profile, otp);
@@ -735,6 +787,7 @@ export const App: React.FC = () => {
       <Header
         rollno={stage === "authenticated" ? erpClient.getSessionState().rollno || profile.rollno : profile.rollno}
         stage={stage}
+        bridge={bridge}
         hasSavedLogin={hasUsableLoginProfile(profile)}
         serverConsent={serverConsent}
         isRefreshing={isRefreshing}
@@ -750,6 +803,8 @@ export const App: React.FC = () => {
         onLogout={handleLogout}
       />
 
+      <ExtensionStatusBanner bridge={bridge} />
+
       <OtpStrip
         authenticated={stage === "authenticated"}
         stage={stage}
@@ -757,7 +812,7 @@ export const App: React.FC = () => {
         rollno={profile.rollno}
         sendingOtp={sendingOtp}
         verifyingOtp={verifyingOtp}
-        extensionReady={extensionReady}
+        bridgeReady={bridge.status === "connected"}
         onSetupLogin={() => setLoginModalOpen(true)}
         onSendOtp={handleSendOtp}
         onVerifyOtp={handleVerifyOtp}
@@ -814,7 +869,13 @@ export const App: React.FC = () => {
         open={loginModalOpen}
         onOpenChange={setLoginModalOpen}
         initialProfile={profile}
-        onFetchQuestions={(roll) => erpClient.fetchAllSecurityQuestions(roll)}
+        bridgeReady={bridge.status === "connected"}
+        onFetchQuestions={async (roll) => {
+          if (bridge.status !== "connected") {
+            throw new Error("Install or update the ERP bridge extension, then reload this page.");
+          }
+          return erpClient.fetchAllSecurityQuestions(roll);
+        }}
         onSaveProfile={(nextProfile, rememberSecrets) => {
           const saved = saveLoginProfile(nextProfile, rememberSecrets);
           setProfile(saved);

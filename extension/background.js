@@ -1,4 +1,5 @@
 const ERP_ORIGIN = "https://erp.iitkgp.ac.in";
+const PORTAL_URL = "https://ewrpkgp.in/";
 
 const LOCAL_SENDER_HOSTS = new Set(["localhost", "127.0.0.1"]);
 const PUBLIC_HTTPS_HOSTS = new Set(["ewrpkgp.in", "www.ewrpkgp.in"]);
@@ -158,7 +159,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       assertAllowedSender(sender);
 
       if (message.action === "PING") {
-        sendResponse({ ok: true, version: "1.0.3" });
+        sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
         return;
       }
       if (message.action === "CLEAR_COOKIES") {
@@ -181,4 +182,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })();
 
   return true;
+});
+
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason !== "install") return;
+  chrome.tabs.create({ url: PORTAL_URL }).catch(() => undefined);
 });
