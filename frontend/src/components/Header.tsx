@@ -1,5 +1,5 @@
 import React from "react";
-import { FileText, KeyRound, LogOut, RefreshCw, ShieldCheck } from "lucide-react";
+import { BookOpen, FileText, KeyRound, LogOut, RefreshCw, ShieldCheck } from "lucide-react";
 import { CvNumber } from "../lib/erpParsers";
 import { ERP_EXTENSION_STORE_URL, type ExtensionBridgeSnapshot } from "../lib/erpBridge";
 import type { CvDiffSummary } from "../lib/matcherApi";
@@ -13,6 +13,7 @@ interface HeaderProps {
   isRefreshing: boolean;
   cvDiffs?: CvDiffSummary | null;
   onOpenCv: (cv: CvNumber) => void;
+  onOpenGuidelines?: () => void;
   onRefresh: () => void;
   onEditLogin: () => void;
   onOpenConsent: () => void;
@@ -28,6 +29,7 @@ export const Header: React.FC<HeaderProps> = ({
   isRefreshing,
   cvDiffs,
   onOpenCv,
+  onOpenGuidelines,
   onRefresh,
   onEditLogin,
   onOpenConsent,
@@ -106,6 +108,17 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
               );
             })}
+            {onOpenGuidelines && (
+              <button
+                type="button"
+                onClick={onOpenGuidelines}
+                className="inline-flex cursor-pointer items-center gap-1 rounded border border-white/20 bg-white/10 px-2 py-0.5 text-[11px] font-bold text-slate-200 hover:bg-white/20"
+                title="View official CDC Placement Guidelines PDF"
+              >
+                <BookOpen className="h-3 w-3" />
+                <span className="hidden md:inline">Guidelines</span>
+              </button>
+            )}
           </div>
         )}
 

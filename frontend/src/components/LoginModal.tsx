@@ -4,7 +4,8 @@ import { X, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { LoginProfile, SecuritySlot, normalizeQuestion } from "../lib/erpParsers";
 import { ERP_EXTENSION_STORE_URL } from "../lib/erpBridge";
-import { loadRememberSecretsPreference, padSlots } from "../lib/storage";
+import { GmailOtpAccount, loadRememberSecretsPreference, padSlots } from "../lib/storage";
+import { GmailOtpSettings } from "./GmailOtpSettings";
 
 interface LoginModalProps {
   open: boolean;
@@ -12,6 +13,9 @@ interface LoginModalProps {
   initialProfile: LoginProfile;
   onFetchQuestions: (rollno: string) => Promise<string[]>;
   onSaveProfile: (profile: LoginProfile, rememberSecrets: boolean) => void;
+  onSaveAndLogin?: (profile: LoginProfile, rememberSecrets: boolean) => void;
+  gmailAccount: GmailOtpAccount;
+  onGmailAccountChange: (account: GmailOtpAccount) => void;
   bridgeReady: boolean;
 }
 
@@ -21,6 +25,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   initialProfile,
   onFetchQuestions,
   onSaveProfile,
+  onSaveAndLogin,
+  gmailAccount,
+  onGmailAccountChange,
   bridgeReady,
 }) => {
   const [rollno, setRollno] = useState(initialProfile.rollno);
@@ -86,34 +93,37 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const buildValidatedProfile = (): LoginProfile | null => {
     const cleanRoll = rollno.trim();
     if (!cleanRoll || !password) {
       toast.error("Roll number and password are required.");
-      return;
+      return null;
     }
     if (slots.filter((s) => s.question.trim() !== "").length < 3) {
       toast.error("Fetch all 3 security questions first.");
-      return;
+      return null;
     }
     if (!slots.some((s) => s.use && s.answer.trim() !== "")) {
       toast.error("At least one question must be marked Use and have an answer.");
-      return;
+      return null;
     }
     const missing = slots.find((s) => s.use && s.question.trim() !== "" && !s.answer.trim());
     if (missing) {
       toast.error("A used question has no answer. Fill it or uncheck Use to skip it at login.");
-      return;
+      return null;
     }
-    onSaveProfile(
-      {
-        rollno: cleanRoll,
-        password,
-        slots,
-      },
-      rememberSecrets
-    );
+    return {
+      rollno: cleanRoll,
+      password,
+      slots,
+    };
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const built = buildValidatedProfile();
+    if (!built) return;
+    onSaveProfile(built, rememberSecrets);
     onOpenChange(false);
     toast.success(
       rememberSecrets
@@ -122,11 +132,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     );
   };
 
+  const handleSaveAndOpenCdc = () => {
+    const built = buildValidatedProfile();
+    if (!built) return;
+    onOpenChange(false);
+    if (onSaveAndLogin) {
+      onSaveAndLogin(built, rememberSecrets);
+      return;
+    }
+    onSaveProfile(built, rememberSecrets);
+  };
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(560px,96vw)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-lg bg-white shadow-xl">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[92vh] w-[min(560px,96vw)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg bg-white shadow-xl">
           <div className="flex items-start justify-between bg-[#12305a] px-4 py-2.5 text-white">
             <div>
               <span className="text-[11px] text-blue-300">
@@ -140,6 +161,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           </div>
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-3 p-4">
+            <GmailOtpSettings account={gmailAccount} onAccountChange={onGmailAccountChange} />
+
             <label className="flex flex-col gap-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
               Roll Number
               <div className="flex gap-1.5">
@@ -245,7 +268,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               Remember password &amp; security answers across browser restarts on this device
             </label>
 
-            <div className="mt-1 flex justify-end gap-2 border-t border-slate-200 pt-3">
+            <div className="mt-1 flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-3">
               <Dialog.Close asChild>
                 <button
                   type="button"
@@ -256,10 +279,20 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               </Dialog.Close>
               <button
                 type="submit"
-                className="rounded bg-blue-700 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-blue-800 cursor-pointer"
+                className="rounded border border-slate-300 bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-800 hover:bg-slate-200 cursor-pointer"
               >
                 Save login
               </button>
+              {onSaveAndLogin && (
+                <button
+                  type="button"
+                  onClick={handleSaveAndOpenCdc}
+                  disabled={!bridgeReady || fetching}
+                  className="rounded bg-blue-700 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-blue-800 disabled:opacity-50 cursor-pointer"
+                >
+                  Save &amp; Open CDC
+                </button>
+              )}
             </div>
           </form>
         </Dialog.Content>

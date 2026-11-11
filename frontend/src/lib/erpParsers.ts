@@ -75,6 +75,14 @@ export interface PlacementNotice {
   attachment_year: string;
 }
 
+export interface JnfMoreDetResult {
+  job_profile: Record<string, string>;
+  job_description: string;
+  compensation_details: Record<string, string>;
+  eligibility_details: Record<string, string>;
+  selection_details: Record<string, string>;
+}
+
 export interface JnfDetails {
   com_id: string;
   jnf_id: string;
@@ -83,8 +91,25 @@ export interface JnfDetails {
   can_cancel: boolean;
   available_cvs: CvNumber[];
   fields: Record<string, string>;
+  more_details_params?: {
+    year: string;
+    rollno: string;
+    com_id: string;
+    jnf_id: string;
+  } | null;
+  compensation_details?: Record<string, string>;
+  eligibility_details?: Record<string, string>;
+  selection_details?: Record<string, string>;
+  company_details?: Record<string, string>;
+  allowed_departments?: string[];
   jd_text: string;
   raw_text: string;
+}
+
+export interface FormattedCtc {
+  primary: string;
+  secondary: string;
+  inrSortValue: number;
 }
 
 function decodeHtmlEntities(input: string): string {
@@ -334,6 +359,27 @@ export function splitGluedUrl(rawUrl: string): { url: string; tail: string } {
     return finish(gdocsEndMatch[1], gdocsEndMatch[2]);
   }
 
+  //    Fixed-token CDC links whose id ends in a capital or digit, so the
+  //    TitleCase heuristic never sees a boundary. The extra group is prose
+  //    glued with no space (Qualtrics SV_ + 15, Oracle /job/<digits>, etc.).
+  const structuralGlues: RegExp[] = [
+    /^(https?:\/\/[^\s]*qualtrics\.com\/jfe\/form\/SV_[A-Za-z0-9]{15})([A-Z][A-Za-z]*)$/,
+    /^(https?:\/\/[^\s]*oraclecloud\.com\/[^\s]*\/job\/\d+)([A-Za-z][A-Za-z]*)$/,
+    /^(https?:\/\/[^\s]*joinsuperset\.com\/[^\s]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})([A-Z][A-Za-z]*)$/i,
+    /^(https?:\/\/teams\.microsoft\.com\/[^\s]*?\/\d+\?p=[A-Za-z0-9]{18})([A-Z][A-Za-z]*)$/,
+    /^(https?:\/\/[^\s]*webex\.com\/[^\s]*MTID=m[0-9a-f]{32})([A-Z][A-Za-z]*)$/i,
+    /^(https?:\/\/[^\s]*on24\.com\/[^\s]*[0-9A-F]{32})([A-Z][A-Za-z]*)$/,
+    /^(https?:\/\/[^\s]*recsolu\.com\/[^\s]*\/requisitions\/[A-Za-z0-9]{22})([A-Z][A-Za-z]*)$/,
+    /^(https?:\/\/[^\s]*accenture\.com\/[^\s]*[?&]event=\d+)([A-Z][A-Za-z]*)$/,
+    /^(https?:\/\/[^\s]*utm_source=External\+Job\+Share)([A-Z][A-Za-z]*)$/,
+  ];
+  for (const pattern of structuralGlues) {
+    const structuralMatch = working.match(pattern);
+    if (structuralMatch) {
+      return finish(structuralMatch[1], structuralMatch[2]);
+    }
+  }
+
   // 3) General heuristic: if the URL ends with a TitleCase word (`[A-Z][a-z]{1,14}`)
   //    that is a common prose starter ("All", "Interested", "Please", "Kindly",
   //    "Students", "The", "Note", "No", "For", "Deadline", etc.) preceded by a
@@ -568,6 +614,181 @@ export function classifyDeadline(startStr: string, endStr: string, now?: Date): 
   };
 }
 
+export function hasErpDownloadLink(cellHtml: string): boolean {
+  const raw = (cellHtml || "").trim();
+  if (!raw) return false;
+  if (/<a\b/i.test(raw)) {
+    const title = extractAttr(raw, "title").toLowerCase();
+    const visibleText = stripHtmlInline(raw).toLowerCase();
+    return (
+      title === "download" ||
+      visibleText === "download" ||
+      visibleText.includes("download") ||
+      raw.includes("AdmFilePDF.htm")
+    );
+  }
+  return Boolean(/NoticeView\s*\(|TPNotice\s*\(|AdmFilePDF\.htm/i.test(raw));
+}
+
+export function formatCtcDisplay(ctcRaw: string, currencyRaw = "INR"): FormattedCtc {
+  const raw = stripHtmlInline(ctcRaw);
+  const currency = (stripHtmlInline(currencyRaw) || "INR").toUpperCase();
+  if (!raw) {
+    return { primary: "—", secondary: "", inrSortValue: 0 };
+  }
+
+  const lpaMatch = raw.match(/^₹?\s*(\d+(?:\.\d+)?)\s*LPA$/i);
+  if (lpaMatch) {
+    const val = Number(lpaMatch[1]);
+    return {
+      primary: `₹${lpaMatch[1]} LPA`,
+      secondary: "",
+      inrSortValue: Number.isFinite(val) ? Math.round(val * 100_000) : 0,
+    };
+  }
+
+  const cleanedNumber = raw.replace(/[₹$,¥€£,\s]/g, "");
+  if (/^\d+(\.\d+)?$/.test(cleanedNumber)) {
+    const amount = Number(cleanedNumber);
+    if (Number.isFinite(amount) && amount > 0) {
+      if (currency === "INR" || raw.includes("₹")) {
+        if (amount >= 100_000) {
+          const lpa = (amount / 100_000).toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+          return {
+            primary: `₹${lpa} LPA`,
+            secondary: `₹${Math.round(amount).toLocaleString("en-IN")}`,
+            inrSortValue: amount,
+          };
+        }
+        return {
+          primary: `₹${Math.round(amount).toLocaleString("en-IN")}`,
+          secondary: "",
+          inrSortValue: amount,
+        };
+      }
+      if (currency === "JPY") {
+        const millions =
+          amount >= 1_000_000
+            ? `¥${(amount / 1_000_000).toFixed(2).replace(/\.00$/, "")}M JPY`
+            : `¥${Math.round(amount).toLocaleString("en-US")} JPY`;
+        return {
+          primary: millions,
+          secondary: amount >= 1_000_000 ? `¥${Math.round(amount).toLocaleString("en-US")}` : "",
+          inrSortValue: Math.round(amount * 0.56),
+        };
+      }
+      if (currency === "USD") {
+        return {
+          primary: `$${Math.round(amount).toLocaleString("en-US")} USD`,
+          secondary: "",
+          inrSortValue: Math.round(amount * 85),
+        };
+      }
+      const fxApprox: Record<string, number> = {
+        GBP: 108,
+        EUR: 92,
+        SGD: 63,
+        AED: 23,
+        HKD: 11,
+        TWD: 2.7,
+      };
+      return {
+        primary: `${Math.round(amount).toLocaleString("en-US")} ${currency}`,
+        secondary: "",
+        inrSortValue: Math.round(amount * (fxApprox[currency] ?? 1)),
+      };
+    }
+  }
+
+  return {
+    primary: currency && currency !== "INR" && !raw.includes(currency) ? `${raw} (${currency})` : raw,
+    secondary: "",
+    inrSortValue: 0,
+  };
+}
+
+const COMPANY_NOISE_WORDS = new Set([
+  "private",
+  "pvt",
+  "limited",
+  "ltd",
+  "inc",
+  "incorporated",
+  "llp",
+  "llc",
+  "plc",
+  "corp",
+  "corporation",
+  "company",
+  "co",
+  "india",
+  "japan",
+  "global",
+  "services",
+  "service",
+  "solutions",
+  "solution",
+  "technologies",
+  "technology",
+  "tech",
+  "advisors",
+  "advisory",
+  "consulting",
+  "group",
+  "holdings",
+  "formerly",
+  "known",
+  "as",
+  "the",
+  "and",
+  "through",
+]);
+
+export function canonicalCompanyTokens(name: string): string[] {
+  const cleaned = (name || "")
+    .toLowerCase()
+    .replace(/\.com\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  if (!cleaned || cleaned.startsWith("cdc ")) return [];
+  const rawTokens = cleaned.split(/\s+/).filter(Boolean);
+  const core = rawTokens.filter((t) => !COMPANY_NOISE_WORDS.has(t));
+  return core.length > 0 ? core : rawTokens;
+}
+
+export function doesNoticeMatchCompany(noticeCompany: string, roleCompany: string): boolean {
+  const nRaw = (noticeCompany || "").trim().toLowerCase();
+  const rRaw = (roleCompany || "").trim().toLowerCase();
+  if (!nRaw || !rRaw || nRaw === "cdc general" || nRaw.startsWith("cdc placement")) {
+    return false;
+  }
+  if (nRaw === rRaw) return true;
+
+  const nTokens = canonicalCompanyTokens(noticeCompany);
+  const rTokens = canonicalCompanyTokens(roleCompany);
+  if (nTokens.length === 0 || rTokens.length === 0) return false;
+
+  const nJoined = nTokens.join("");
+  const rJoined = rTokens.join("");
+  if (nJoined.length >= 3 && nJoined === rJoined) return true;
+
+  // First primary brand token match when sufficiently distinctive (e.g. "Accenture", "Airbus", "Phyagents", "IQVIA")
+  if (nTokens[0] === rTokens[0] && nTokens[0].length >= 4) {
+    if (nTokens.length === 1 || rTokens.length === 1) return true;
+    if (nTokens[1] === rTokens[1]) return true;
+  }
+
+  // Subset check when notice uses short brand name ("YCP Auctus" vs "YCP ... Auctus")
+  if (
+    nTokens.every((t) => t.length >= 3 && rTokens.includes(t)) ||
+    rTokens.every((t) => t.length >= 3 && nTokens.includes(t))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 export function parseCompanyRow(index: number, cells: string[], now?: Date): CompanyRole {
   const padded = [...cells];
   while (padded.length < 13) padded.push("");
@@ -589,10 +810,21 @@ export function parseCompanyRow(index: number, cells: string[], now?: Date): Com
     /TPJNFView\(\s*['"](\d+)['"]\s*,\s*['"](\d+)['"]\s*(?:,\s*['"]([^'"]+)['"])?\s*\)/
   );
   const companyCall = companyHtml.match(/TPComView\(\s*['"]([^'"]+)['"]\s*,\s*['"](\d+)['"]\s*\)/);
+  const jnfDescCall = view1Html.match(
+    /TPJNFDescription\(\s*['"]([^'"]+)['"]\s*,\s*['"](\d+)['"]\s*,\s*['"](\d+)['"]\s*\)/
+  );
 
-  const jnf_id = roleCall ? roleCall[1] : "";
-  const com_id = (roleCall && roleCall[2]) || (companyCall && companyCall[2]) || "";
-  const yop = (roleCall && roleCall[3]) || (companyCall && companyCall[1]) || DEFAULT_YOP;
+  const jnf_id = (roleCall && roleCall[1]) || (jnfDescCall && jnfDescCall[3]) || "";
+  const com_id =
+    (roleCall && roleCall[2]) ||
+    (companyCall && companyCall[2]) ||
+    (jnfDescCall && jnfDescCall[2]) ||
+    "";
+  const yop =
+    (roleCall && roleCall[3]) ||
+    (companyCall && companyCall[1]) ||
+    (jnfDescCall && jnfDescCall[1]) ||
+    DEFAULT_YOP;
 
   const company = extractAttr(companyHtml, "title") || stripHtmlInline(companyHtml);
   const role = extractAttr(designationHtml, "title") || stripHtmlInline(designationHtml);
@@ -623,9 +855,9 @@ export function parseCompanyRow(index: number, cells: string[], now?: Date): Com
     com_id,
     jnf_id,
     yop,
-    has_com_doc: view2Html.includes("TPComDescription"),
-    has_ppt_doc: view3Html.includes("TPPPTDescription"),
-    has_jnf_doc: view1Html.includes("TPJNFDescription"),
+    has_com_doc: hasErpDownloadLink(view2Html),
+    has_ppt_doc: hasErpDownloadLink(view3Html),
+    has_jnf_doc: hasErpDownloadLink(view1Html),
   };
 }
 
@@ -682,13 +914,20 @@ export function parseNoticeRow(index: number, cells: string[]): PlacementNotice 
   }
   bodyText = prettifyNoticeText(bodyText);
 
-  const attachCall = viewHtml.match(/NoticeView\(\s*['"](\d+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/);
-  const has_attachment = Boolean(attachCall) || viewHtml.includes("AdmFilePDF.htm");
-  const attachment_year = attachCall ? attachCall[2] : DEFAULT_YOP;
+  // Real CDC Notice.jsp uses TPNotice(year, id) with >Download</a> only when a file exists;
+  // also retain NoticeView(id, year) compatibility.
+  const tpNoticeCall = viewHtml.match(/TPNotice\(\s*['"]([^'"]+)['"]\s*,\s*['"](\d+)['"]\s*\)/i);
+  const legacyAttachCall = viewHtml.match(
+    /NoticeView\(\s*['"](\d+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/i
+  );
+  const has_attachment = hasErpDownloadLink(viewHtml);
+  const resolvedId = (tpNoticeCall && tpNoticeCall[2]) || (legacyAttachCall && legacyAttachCall[1]) || id;
+  const attachment_year =
+    (tpNoticeCall && tpNoticeCall[1]) || (legacyAttachCall && legacyAttachCall[2]) || DEFAULT_YOP;
 
   return {
     n: index,
-    id,
+    id: resolvedId || id,
     type,
     category: category || "General",
     subject: category || "General",
@@ -719,6 +958,307 @@ function extractAppliedCv(page: string): CvNumber | null {
   return null;
 }
 
+/**
+ * Cleans Win-1252 / mojibake artifacts and formats inline bullets/pipes emitted by
+ * ERP's TPJNFView.jsp and JnfMoreDet.jsp ("Click Here for more details") into crisp,
+ * multi-line readable text.
+ */
+export function prettifyErpRichText(input: string): string {
+  if (!input) return "";
+  let text = decodeHtmlEntities(input)
+    .replace(/\uFFFD/g, " — ")
+    .replace(/""([^"\n]+)""/g, '"$1"')
+    .replace(/''/g, "'")
+    .replace(/\r\n?/g, "\n");
+
+  // Put Unicode bullet glyphs (● \u25CF, ○ \u25CB, ▪ \u25AA, ◆ \u25C6) onto clean lines
+  text = text.replace(/\s*[\u25CF\u25AA\u25C6]\s*/g, "\n• ");
+  text = text.replace(/\s*\u25CB\s*/g, "\n  ◦ ");
+
+  // Convert inline asterisk lists ("foo: * Design and ... * Development of ...") into bullet lines
+  if ((text.match(/\s\*\s+[A-Z]/g) || []).length >= 2) {
+    text = text.replace(/(^|[:.;])\s*\*\s+(?=[A-Z])/g, "$1\n• ");
+    text = text.replace(/\s+\*\s+(?=[A-Z])/g, "\n• ");
+  }
+
+  // Split pipe-delimited compensation/detail strings ("Fixed 2222222 | Bonus 177778 | Total 2400000")
+  if (text.includes(" | ")) {
+    text = text
+      .split(/\s*\|\s*/)
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .join("\n• ");
+    if (text.includes("\n• ")) text = `• ${text}`;
+  }
+
+  return text
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function formatCtcBreakupText(input: string): string {
+  const base = prettifyErpRichText(input);
+  if (!base || base.includes("\n")) return base;
+
+  // Format comma-separated or run-on "Component: Value" CTC breakups into clean bullet lines:
+  // e.g. "Total Base Salary: 577500, Total Allowances: 276171, Joining Bonus: 100000"
+  const commaParts = base.split(/,\s+(?=[A-Z0-9][A-Za-z0-9 '/()-]{2,38}:)/);
+  if (commaParts.length >= 2) {
+    return commaParts.map((p) => `• ${p.trim()}`).join("\n");
+  }
+
+  // Run-on space-separated currency breakups (e.g. Amazon / Accenture Japan):
+  // "Base Pay (INR) 2,030,000 Sign-on Bonus Year 1 (INR) 643,500 ..."
+  const runOn = base.replace(
+    /(\d[\d,]*(?:\s*(?:INR|JPY|USD|EUR|GBP|SGD|\([^)]+\)))?)\s+(?=(?:Base|Gross|Fixed|Total|Sign-on|Signing|Joining|Relocation|Retention|Restricted|Employees|Employment|Housing|Monthly|Variable|Performance|Bonus|Annual|CTC)\b)/gi,
+    "$1\n• "
+  );
+  if (runOn.includes("\n• ")) {
+    return `• ${runOn.trim()}`;
+  }
+
+  return base;
+}
+
+export function parseJnfMoreDetHtml(page: string): JnfMoreDetResult {
+  const job_profile: Record<string, string> = {};
+  let job_description = "";
+  const compensation_details: Record<string, string> = {};
+  const eligibility_details: Record<string, string> = {};
+  const selection_details: Record<string, string> = {};
+
+  if (
+    !page ||
+    /500\s+Internal\s+Server/i.test(page) ||
+    /Sorry,\s*You\s+are\s+not\s+supposed\s+to\s+open\s+this/i.test(page)
+  ) {
+    return {
+      job_profile,
+      job_description,
+      compensation_details,
+      eligibility_details,
+      selection_details,
+    };
+  }
+
+  // 1) Parse <h4>Job Profile</h4> table if present
+  const profileTableMatch = page.match(
+    /<h4[^>]*>\s*Job\s+Profile\s*<\/h4>\s*<table[^>]*>([\s\S]*?)<\/table>/i
+  );
+  if (profileTableMatch) {
+    const ths = Array.from(profileTableMatch[1].matchAll(/<th[^>]*>([\s\S]*?)<\/th>/gi)).map((m) =>
+      stripHtmlInline(m[1]).replace(/:+$/, "").trim()
+    );
+    const tds = Array.from(profileTableMatch[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)).map((m) =>
+      stripHtmlInline(m[1]).trim()
+    );
+    for (let i = 0; i < Math.min(ths.length, tds.length); i++) {
+      if (ths[i] && tds[i]) {
+        job_profile[ths[i]] = tds[i];
+      }
+    }
+  }
+
+  // 2) Parse <h4>Job Description</h4> <div>...</div>
+  const jdBlockMatch = page.match(
+    /<h4[^>]*>\s*Job\s+Description\s*<\/h4>\s*<div[^>]*>([\s\S]*?)<\/div>\s*(?=<h4|$)/i
+  );
+  if (jdBlockMatch) {
+    job_description = prettifyErpRichText(stripHtml(jdBlockMatch[1]));
+  }
+
+  const COMP_KEY_RE =
+    /ctc|salary|gross|bonus|perk|benefit|stipend|compensation|allowance|stock|esop|take\s*home/i;
+  const ELIG_KEY_RE =
+    /bond|skill|pwd|dap|disability|cgpa|backlog|medical|additional\s*info|criteria|cutoff/i;
+
+  const otherSplitIdx = page.search(/<h4[^>]*>\s*Other\s+Details\s*<\/h4>/i);
+  const selectionSplitIdx = page.search(/<h4[^>]*>\s*Selection\s+Details\s*<\/h4>/i);
+  const startIdx = otherSplitIdx >= 0 ? otherSplitIdx : 0;
+  const upperSection =
+    selectionSplitIdx >= 0 ? page.slice(startIdx, selectionSplitIdx) : page.slice(startIdx);
+  const selectionSection = selectionSplitIdx >= 0 ? page.slice(selectionSplitIdx) : "";
+
+  const extractBootstrapPairs = (chunk: string): Array<[string, string]> => {
+    if (!chunk) return [];
+    if (typeof DOMParser !== "undefined") {
+      const doc = new DOMParser().parseFromString(chunk, "text/html");
+      const nodes = Array.from(
+        doc.querySelectorAll('[class*="col-xs-"], [class*="col-sm-"], [class*="col-md-"]')
+      );
+      const pairs: Array<[string, string]> = [];
+      for (let i = 0; i + 1 < nodes.length; i += 2) {
+        const rawLabel = (nodes[i].textContent || "")
+          .replace(/\s+/g, " ")
+          .replace(/\s*:\s*$/, "")
+          .trim();
+        const rawVal = stripHtml(nodes[i + 1].innerHTML || "");
+        if (rawLabel && rawLabel.length <= 90) {
+          pairs.push([rawLabel, rawVal]);
+        }
+      }
+      return pairs;
+    }
+    const cols = Array.from(
+      chunk.matchAll(
+        /<div[^>]*class=['"][^'"]*\bcol-(?:xs|sm|md)-\d+\b[^'"]*['"][^>]*>([\s\S]*?)<\/div>/gi
+      )
+    );
+    const pairs: Array<[string, string]> = [];
+    for (let i = 0; i + 1 < cols.length; i += 2) {
+      const rawLabel = stripHtmlInline(cols[i][1]).replace(/\s*:\s*$/, "").trim();
+      const rawVal = stripHtml(cols[i + 1][1]).trim();
+      if (rawLabel && rawLabel.length <= 90) {
+        pairs.push([rawLabel, rawVal]);
+      }
+    }
+    return pairs;
+  };
+
+  const cleanLabelName = (raw: string): string =>
+    raw
+      .replace(/,\s*if\s+any\s*$/i, "")
+      .replace(/\s*\(provide\s+details\s+below\)\s*$/i, "")
+      .trim();
+
+  const isMeaningfulValue = (val: string): boolean => {
+    const clean = val.trim();
+    if (!clean) return false;
+    if (/^(n\/a|na|nil|none|-|--|refer\s+jd)$/i.test(clean)) return false;
+    return true;
+  };
+
+  const rawUpperPairs = extractBootstrapPairs(upperSection);
+  for (let i = 0; i < rawUpperPairs.length; i++) {
+    const [origLabel, origVal] = rawUpperPairs[i];
+    if (!isMeaningfulValue(origVal)) continue;
+
+    // Combine conditional ERP pairs cleanly ("Is there a CGPA Criteria?" = Yes + "If Yes, minimum CGPA required" = 6.5)
+    if (/^Is\s+there\s+a\s+CGPA\s+Criteria\??$/i.test(origLabel)) {
+      const next = rawUpperPairs[i + 1];
+      if (next && /^If\s+Yes.*CGPA/i.test(next[0])) {
+        const minCgpa = next[1].trim();
+        eligibility_details["CGPA Criteria"] =
+          /^yes$/i.test(origVal.trim()) && isMeaningfulValue(minCgpa)
+            ? `Yes (Minimum CGPA: ${minCgpa})`
+            : origVal.trim();
+        i += 1;
+        continue;
+      }
+      eligibility_details["CGPA Criteria"] = origVal.trim();
+      continue;
+    }
+
+    if (/^Is\s+the\s+position\s+also\s+open\s+to\s+PwD/i.test(origLabel)) {
+      const next = rawUpperPairs[i + 1];
+      if (next && /^If\s+No.*disability/i.test(next[0])) {
+        const note = next[1].trim();
+        eligibility_details["Open to PwD / DAP"] =
+          /^no$/i.test(origVal.trim()) && isMeaningfulValue(note)
+            ? `No (${prettifyErpRichText(note)})`
+            : origVal.trim();
+        i += 1;
+        continue;
+      }
+      eligibility_details["Open to PwD / DAP"] = origVal.trim();
+      continue;
+    }
+
+    if (/^Bonds$/i.test(origLabel)) {
+      let bondSummary = origVal.trim();
+      const durPair = rawUpperPairs[i + 1];
+      const amtPair = rawUpperPairs[i + 2];
+      if (
+        durPair &&
+        /^Bond\s+Duration$/i.test(durPair[0]) &&
+        amtPair &&
+        /^Bond\s+Amount$/i.test(amtPair[0])
+      ) {
+        const extras: string[] = [];
+        if (isMeaningfulValue(durPair[1]) && durPair[1].trim() !== "0") {
+          extras.push(`Duration: ${durPair[1].trim()}`);
+        }
+        if (isMeaningfulValue(amtPair[1]) && amtPair[1].trim() !== "0") {
+          extras.push(`Amount: ${amtPair[1].trim()}`);
+        }
+        if (extras.length > 0) {
+          bondSummary = `${bondSummary} (${extras.join(", ")})`;
+        }
+        eligibility_details["Bond / Service Contract"] = bondSummary;
+        i += 2;
+        continue;
+      }
+    }
+
+    if (/^If\s+(?:Yes|No)\b/i.test(origLabel)) continue;
+
+    const label = cleanLabelName(origLabel);
+    if (COMP_KEY_RE.test(origLabel)) {
+      if (origVal.trim() === "0" && /bonus/i.test(origLabel)) continue;
+      compensation_details[label] = /breakup/i.test(origLabel)
+        ? formatCtcBreakupText(origVal)
+        : prettifyErpRichText(origVal);
+    } else if (ELIG_KEY_RE.test(origLabel)) {
+      if (origVal.trim() === "0" && /bond\s*amount/i.test(origLabel)) continue;
+      eligibility_details[label] = prettifyErpRichText(origVal);
+    } else {
+      eligibility_details[label] = prettifyErpRichText(origVal);
+    }
+  }
+
+  const rawSelectionPairs = extractBootstrapPairs(selectionSection);
+  for (let i = 0; i < rawSelectionPairs.length; i++) {
+    const [origLabel, origVal] = rawSelectionPairs[i];
+    if (!isMeaningfulValue(origVal)) continue;
+    if (/^If\s+Yes,\s*Mode$/i.test(origLabel)) continue;
+
+    const next = rawSelectionPairs[i + 1];
+    if (next && /^If\s+Yes,\s*Mode$/i.test(next[0])) {
+      const modeVal = next[1].trim();
+      selection_details[cleanLabelName(origLabel)] =
+        /^yes$/i.test(origVal.trim()) && isMeaningfulValue(modeVal)
+          ? `Yes (${modeVal})`
+          : origVal.trim();
+      i += 1;
+      continue;
+    }
+
+    selection_details[cleanLabelName(origLabel)] = prettifyErpRichText(origVal);
+  }
+
+  return {
+    job_profile,
+    job_description,
+    compensation_details,
+    eligibility_details,
+    selection_details,
+  };
+}
+
+export function parseComViewHtml(page: string): Record<string, string> {
+  const details: Record<string, string> = {};
+  if (!page) return details;
+
+  const rowMatches = page.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi);
+  for (const trMatch of rowMatches) {
+    const rawCells = Array.from(trMatch[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)).map(
+      (m) => m[1]
+    );
+    if (rawCells.length !== 2) continue;
+    const label = stripHtmlInline(rawCells[0]).replace(/:+$/, "").trim();
+    let val = stripHtml(rawCells[1]).trim();
+    if (!label || !val || label.length > 50 || /^company\s+details$/i.test(label)) continue;
+    if (/^website$/i.test(label)) {
+      val = val.replace(/^http:\/\/(https?:\/\/)/i, "$1");
+    }
+    details[label] = val;
+  }
+  return details;
+}
+
 export function parseJnfHtml(page: string, com_id = "", jnf_id = ""): JnfDetails {
   const applied_cv = extractAppliedCv(page);
   const can_cancel =
@@ -728,23 +1268,98 @@ export function parseJnfHtml(page: string, com_id = "", jnf_id = ""): JnfDetails
     if (page.includes(`ApplyCV${cvNum}`)) available_cvs.push(cvNum);
   }
 
+  // Extract exact onclick="jnfMoreDet('2026-2027', '22NA30028', '226', '12')" parameters from "Click Here for more details"
+  const moreDetCall = page.match(
+    /jnfMoreDet\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*,\s*['"](\d+)['"]\s*,\s*['"](\d+)['"]\s*\)/i
+  );
+  const more_details_params = moreDetCall
+    ? {
+        year: moreDetCall[1].trim(),
+        rollno: moreDetCall[2].trim(),
+        com_id: moreDetCall[3].trim(),
+        jnf_id: moreDetCall[4].trim(),
+      }
+    : null;
+
   const fields: Record<string, string> = {};
   const longBlocks: string[] = [];
+  const allowed_departments: string[] = [];
+  let inAllowedDepartments = false;
+  let pendingHeaders: string[] | null = null;
+  let nextSingleCellIsJd = false;
+
   const rowMatches = page.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi);
   for (const trMatch of rowMatches) {
     const trHtml = trMatch[1];
-    const cells = Array.from(trHtml.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi))
-      .map((m) => stripHtml(m[1]))
-      .filter(Boolean);
-    if (cells.length === 2) {
+    // Avoid double-counting outer wrapper <tr> that itself contains a nested <table>
+    if (/<table\b/i.test(trHtml)) continue;
+
+    const thCells = Array.from(trHtml.matchAll(/<th\b[^>]*>([\s\S]*?)<\/th>/gi)).map((m) =>
+      stripHtmlInline(m[1])
+    );
+    if (thCells.length >= 2) {
+      pendingHeaders = thCells;
+      continue;
+    }
+
+    const rawCells = Array.from(trHtml.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)).map((m) =>
+      stripHtml(m[1])
+    );
+    if (pendingHeaders && rawCells.length === pendingHeaders.length) {
+      for (let i = 0; i < pendingHeaders.length; i++) {
+        const k = pendingHeaders[i].replace(/:+$/, "").trim();
+        const v = rawCells[i].trim();
+        if (k && v) fields[k] = v;
+      }
+      pendingHeaders = null;
+      continue;
+    }
+    pendingHeaders = null;
+
+    const cells = rawCells.filter(Boolean);
+    if (cells.length === 0) continue;
+
+    if (cells.length === 1) {
+      const text = cells[0].trim();
+      if (/^Allowed\s+Departments\s+and\s+degrees$/i.test(text)) {
+        inAllowedDepartments = true;
+        nextSingleCellIsJd = false;
+        continue;
+      }
+      if (/^View\s+More\s+Details$/i.test(text) || /^Click\s+Here\s+for\s+more\s+details/i.test(text)) {
+        nextSingleCellIsJd = false;
+        continue;
+      }
+      if (/^Job\s+Description$/i.test(text)) {
+        nextSingleCellIsJd = true;
+        continue;
+      }
+      if (inAllowedDepartments) {
+        if (text && !/Notification Form More Details/i.test(text)) {
+          allowed_departments.push(text);
+        }
+        continue;
+      }
+      if (nextSingleCellIsJd || text.length > 80) {
+        if (
+          !/^Company\s*:/i.test(text) &&
+          !/^View\s+applied\s+Resume$/i.test(text) &&
+          !/Sorry,\s*You\s+are\s+not\s+supposed\s+to\s+open\s+this/i.test(text)
+        ) {
+          longBlocks.push(prettifyErpRichText(text));
+        }
+        nextSingleCellIsJd = false;
+      }
+      continue;
+    }
+
+    if (cells.length === 2 && !inAllowedDepartments) {
       const label = cells[0].replace(/:+$/, "").trim();
       const val = cells[1].trim();
       if (label && val && label.length <= 65) {
         fields[label] = val;
         if (val.length > 80) longBlocks.push(`${label}: ${val}`);
       }
-    } else if (cells.length === 1 && cells[0].length > 80) {
-      longBlocks.push(cells[0]);
     }
   }
 
@@ -762,7 +1377,7 @@ export function parseJnfHtml(page: string, com_id = "", jnf_id = ""): JnfDetails
   );
 
   const summaryText =
-    longBlocks.length > 0 ? longBlocks.join("\n") : filteredLines.slice(0, 60).join("\n");
+    longBlocks.length > 0 ? longBlocks.join("\n\n") : filteredLines.slice(0, 60).join("\n");
 
   return {
     com_id,
@@ -772,6 +1387,8 @@ export function parseJnfHtml(page: string, com_id = "", jnf_id = ""): JnfDetails
     can_cancel,
     available_cvs,
     fields,
+    more_details_params,
+    allowed_departments,
     jd_text: summaryText.slice(0, 6000),
     raw_text: filteredLines.join("\n").slice(0, 8000),
   };

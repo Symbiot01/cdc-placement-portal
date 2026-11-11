@@ -8,6 +8,7 @@ export const LEGACY_LOGIN_STORAGE_KEY = "erp_cdc_login_fields_v1";
 export const READ_NOTICES_STORAGE_KEY = "erp_cdc_read_notice_ids_v1";
 export const APPLIED_CV_STORAGE_KEY = "erp_cdc_applied_cv_map_v1";
 export const DATA_CONSENT_STORAGE_KEY = "erp_cdc_server_data_consent_v1";
+export const GMAIL_OTP_ACCOUNT_KEY = "erp_cdc_gmail_otp_account_v1";
 export const AI_CACHE_STORAGE_KEY = "erp_cdc_ai_cache_v1";
 export const AI_CACHE_SESSION_KEY = "erp_cdc_ai_cache_session_v1";
 
@@ -159,6 +160,50 @@ export function saveLoginProfile(
   }
 
   return normalized;
+}
+
+export interface GmailOtpAccount {
+  enabled: boolean;
+  email: string;
+}
+
+export function loadGmailOtpAccount(): GmailOtpAccount {
+  try {
+    const raw = localStorage.getItem(GMAIL_OTP_ACCOUNT_KEY);
+    if (!raw) return { enabled: false, email: "" };
+    const parsed = JSON.parse(raw) as Partial<GmailOtpAccount>;
+    const email = String(parsed.email || "").trim().toLowerCase();
+    return {
+      enabled: parsed.enabled === true,
+      email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "",
+    };
+  } catch {
+    return { enabled: false, email: "" };
+  }
+}
+
+export function saveGmailOtpAccount(account: GmailOtpAccount): GmailOtpAccount {
+  const email = account.email.trim().toLowerCase();
+  const clean: GmailOtpAccount = {
+    enabled: account.enabled === true,
+    email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "",
+  };
+  try {
+    localStorage.setItem(GMAIL_OTP_ACCOUNT_KEY, JSON.stringify(clean));
+  } catch {
+    /* ignore storage quota errors */
+  }
+  return clean;
+}
+
+export function clearGmailOtpAccount(): GmailOtpAccount {
+  const clean: GmailOtpAccount = { enabled: false, email: "" };
+  try {
+    localStorage.removeItem(GMAIL_OTP_ACCOUNT_KEY);
+  } catch {
+    /* ignore */
+  }
+  return clean;
 }
 
 export function clearSavedLoginSecrets(): void {

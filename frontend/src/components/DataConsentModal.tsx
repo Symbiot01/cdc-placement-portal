@@ -45,7 +45,7 @@ export const DataConsentModal: React.FC<DataConsentModalProps> = ({
             </ul>
             <div className="rounded border border-emerald-200 bg-emerald-50 p-2.5 text-[11.5px] text-emerald-950">
               <strong>Strict Privacy Guarantee:</strong> Your roll number, ERP password, security
-              questions/answers, email OTP, and ERP session cookies <strong>never</strong> leave
+              questions/answers, email OTP, Gmail access tokens, and ERP session cookies <strong>never</strong> leave
               your browser. All ERP login and apply/cancel actions happen directly between your
               browser and <code>erp.iitkgp.ac.in</code>.
             </div>

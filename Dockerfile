@@ -4,7 +4,9 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
 ARG VITE_BACKEND_URL=""
+ARG VITE_GMAIL_CLIENT_ID="469058814802-oek1jvukouhifuq2sktfp1ae8fudj8jj.apps.googleusercontent.com"
 ENV VITE_BACKEND_URL=${VITE_BACKEND_URL}
+ENV VITE_GMAIL_CLIENT_ID=${VITE_GMAIL_CLIENT_ID}
 RUN npm run build
 
 FROM nginx:1.27-alpine

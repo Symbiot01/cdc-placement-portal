@@ -7,10 +7,6 @@ server {
 
     resolver 127.0.0.11 valid=10s ipv6=off;
 
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header Referrer-Policy "no-referrer" always;
-
     client_max_body_size 10m;
 
     location /api/ {
@@ -27,6 +23,11 @@ server {
     }
 
     location / {
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Cross-Origin-Opener-Policy "same-origin-allow-popups" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://accounts.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com; connect-src 'self' https://api.ewrpkgp.in https://gmail.googleapis.com https://oauth2.googleapis.com https://accounts.google.com; frame-src 'self' blob: https://accounts.google.com; object-src 'self' blob:; img-src 'self' data: https:; font-src 'self' data:; base-uri 'self'; frame-ancestors 'none'" always;
         try_files $uri $uri/ /index.html;
     }
 }

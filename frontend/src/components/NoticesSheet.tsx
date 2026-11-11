@@ -1,321 +1,303 @@
-import React, { useState } from "react";
-import { Paperclip } from "lucide-react";
-import { PlacementNotice, splitGluedUrl } from "../lib/erpParsers";
+import React, { useMemo, useState } from "react";
+import { CheckCheck, CheckCircle2, FileText, Paperclip, Search, X } from "lucide-react";
+import {
+  CompanyRole,
+  PlacementNotice,
+  doesNoticeMatchCompany,
+} from "../lib/erpParsers";
+import type { ErpAttachmentRequest } from "../lib/erpBridge";
+
+type NoticeQuickFilter = "all" | "unread" | "attachments" | "applied";
 
 interface NoticesSheetProps {
   notices: PlacementNotice[];
+  companies: CompanyRole[];
   readIds: Set<string>;
+  externalSearch?: string;
+  onClearExternalSearch?: () => void;
   onMarkRead: (id: string) => void;
   onMarkAllRead: () => void;
-  onOpenAttachment: (noticeId: string, year: string) => void;
+  onOpenAttachment: (req: ErpAttachmentRequest) => void;
 }
 
-const LABEL_LINE =
-  /^(Join link|Link|Note|POC|Deadline|Venue|Meeting ID|Passcode|Password|Webinar number|Webinar password|Session number|Session password|Registration Link(?: for [^:]+)?|Registration link|Additional Details Form|Application Link|Assessment Link|Test Link|Form Link|Form link|Google Form|Meeting link|Meeting Link|Reporting Time|Mode|PFA|PFB)\s*[:：]\s*(.*)$/i;
+const URL_TOKEN_RE = /(https?:\/\/[^\s<>"')]+)/g;
 
-function linkifySegment(text: string, keyPrefix: string): React.ReactNode[] {
-  const urlRe = /(https?:\/\/[^\s<>"]+)/g;
-  const parts: React.ReactNode[] = [];
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = urlRe.exec(text)) !== null) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    const { url, tail } = splitGluedUrl(m[0]);
-    parts.push(
-      <a
-        key={`${keyPrefix}-u-${m.index}`}
-        href={url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline break-all font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {url}
-      </a>
-    );
-    if (tail) parts.push(tail.replace(/^\n/, " "));
-    last = urlRe.lastIndex;
+function categoryPillClass(category: string): string {
+  const low = (category || "").toLowerCase();
+  if (low.includes("shortlist") || low.includes("selection") || low.includes("offer")) {
+    return "border border-emerald-200 bg-emerald-50 text-emerald-800";
   }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts;
+  if (low.includes("interview") || low.includes("gd") || low.includes("schedule")) {
+    return "border border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (low.includes("test") || low.includes("assessment") || low.includes("coding")) {
+    return "border border-purple-200 bg-purple-50 text-purple-800";
+  }
+  if (low.includes("ppt") || low.includes("workshop") || low.includes("talk")) {
+    return "border border-sky-200 bg-sky-50 text-sky-800";
+  }
+  if (low.includes("urgent") || low.includes("deadline")) {
+    return "border border-red-200 bg-red-50 text-red-700";
+  }
+  return "bg-slate-100 text-slate-700";
 }
 
-function renderInlineFormatting(line: string, keyPrefix: string): React.ReactNode[] {
-  const tokenRegex = /(https?:\/\/[^\s<>"]+)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)/g;
-  const parts: React.ReactNode[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = tokenRegex.exec(line)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(...linkifySegment(line.slice(lastIndex, match.index), `${keyPrefix}-${match.index}`));
-    }
-    const token = match[0];
-    if (token.startsWith("http://") || token.startsWith("https://")) {
-      const { url, tail } = splitGluedUrl(token);
-      parts.push(
+function renderLinkifiedText(text: string): React.ReactNode {
+  if (!text) return null;
+  const parts = text.split(URL_TOKEN_RE);
+  return parts.map((part, idx) => {
+    if (/^https?:\/\//i.test(part)) {
+      return (
         <a
-          key={`${keyPrefix}-url-${match.index}`}
-          href={url}
+          key={idx}
+          href={part}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline break-all font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900"
           onClick={(e) => e.stopPropagation()}
+          className="font-medium break-all text-blue-700 underline hover:text-blue-900"
         >
-          {url}
+          {part}
         </a>
       );
-      if (tail) parts.push(tail.replace(/^\n/, " "));
-    } else if (token.startsWith("**") && token.endsWith("**")) {
-      parts.push(
-        <strong key={`${keyPrefix}-b-${match.index}`} className="font-bold text-slate-900">
-          {token.slice(2, -2)}
-        </strong>
-      );
-    } else if (token.startsWith("*") && token.endsWith("*")) {
-      parts.push(
-        <em key={`${keyPrefix}-i-${match.index}`} className="italic">
-          {token.slice(1, -1)}
-        </em>
-      );
     }
-    lastIndex = tokenRegex.lastIndex;
-  }
-
-  if (lastIndex < line.length) {
-    parts.push(...linkifySegment(line.slice(lastIndex), `${keyPrefix}-tail`));
-  }
-  return parts;
-}
-
-function renderNoticeBody(raw: string): React.ReactNode {
-  const text = (raw || "").trim();
-  if (!text) {
-    return <p className="italic text-slate-400">No notice text.</p>;
-  }
-
-  const lines = text.split("\n");
-  const blocks: React.ReactNode[] = [];
-  let bullets: string[] = [];
-  let numbered: string[] = [];
-
-  const flushBullets = (keyPrefix: string) => {
-    if (bullets.length === 0) return;
-    blocks.push(
-      <ul key={`${keyPrefix}-ul`} className="my-1.5 list-disc space-y-1 pl-4">
-        {bullets.map((b, idx) => (
-          <li key={idx} className="break-words">
-            {renderInlineFormatting(b, `${keyPrefix}-b${idx}`)}
-          </li>
-        ))}
-      </ul>
-    );
-    bullets = [];
-  };
-
-  const flushNumbered = (keyPrefix: string) => {
-    if (numbered.length === 0) return;
-    blocks.push(
-      <ol key={`${keyPrefix}-ol`} className="my-1.5 list-decimal space-y-1.5 pl-5">
-        {numbered.map((b, idx) => (
-          <li key={idx} className="break-words pl-0.5">
-            {renderInlineFormatting(b, `${keyPrefix}-n${idx}`)}
-          </li>
-        ))}
-      </ol>
-    );
-    numbered = [];
-  };
-
-  const flushLists = (keyPrefix: string) => {
-    flushBullets(keyPrefix);
-    flushNumbered(keyPrefix);
-  };
-
-  lines.forEach((rawLine, idx) => {
-    const line = rawLine.trim();
-    if (!line) {
-      flushLists(`line-${idx}`);
-      return;
-    }
-
-    const bulletMatch = line.match(/^(?:•|-|\*)\s+(.*)$/);
-    if (bulletMatch) {
-      flushNumbered(`line-${idx}`);
-      bullets.push(bulletMatch[1]);
-      return;
-    }
-
-    const numberedMatch = line.match(/^\d+[.)]\s+(.*)$/);
-    if (numberedMatch) {
-      flushBullets(`line-${idx}`);
-      numbered.push(numberedMatch[1]);
-      return;
-    }
-
-    flushLists(`line-${idx}`);
-
-    const labelMatch = line.match(LABEL_LINE);
-    if (labelMatch) {
-      const label = labelMatch[1].replace(/\s+/g, " ");
-      const rest = (labelMatch[2] || "").trim();
-      blocks.push(
-        <p key={`label-${idx}`} className="my-1.5 break-words leading-relaxed">
-          <span className="font-bold text-slate-900">{label}:</span>
-          {rest ? (
-            <>
-              {" "}
-              {renderInlineFormatting(rest, `label-${idx}`)}
-            </>
-          ) : null}
-        </p>
-      );
-      return;
-    }
-
-    const isDayHeader =
-      /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),/i.test(line);
-    const isFooter = /^CDC,?\s*IIT Kharagpur\.?$/i.test(line);
-
-    if (isDayHeader) {
-      blocks.push(
-        <p
-          key={`day-${idx}`}
-          className="mb-0.5 mt-2.5 break-words text-[12px] font-extrabold uppercase tracking-wide text-slate-700"
-        >
-          {line}
-        </p>
-      );
-      return;
-    }
-
-    if (isFooter) {
-      blocks.push(
-        <p key={`foot-${idx}`} className="mt-2 break-words text-[11px] font-medium text-slate-500">
-          {line}
-        </p>
-      );
-      return;
-    }
-
-    blocks.push(
-      <p key={`p-${idx}`} className="my-1 break-words leading-relaxed">
-        {renderInlineFormatting(line, `p-${idx}`)}
-      </p>
-    );
+    return <React.Fragment key={idx}>{part}</React.Fragment>;
   });
-  flushLists("end");
-
-  return <div className="min-w-0 text-[13px] text-slate-800">{blocks}</div>;
 }
 
 export const NoticesSheet: React.FC<NoticesSheetProps> = ({
   notices,
+  companies,
   readIds,
+  externalSearch,
+  onClearExternalSearch,
   onMarkRead,
   onMarkAllRead,
   onOpenAttachment,
 }) => {
   const [search, setSearch] = useState("");
-  const query = search.trim().toLowerCase();
+  const [quickFilter, setQuickFilter] = useState<NoticeQuickFilter>("all");
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
-  const filtered = notices.filter((n) => {
-    if (!query) return true;
-    const hay = `${n.category} ${n.company} ${n.notice} ${n.when}`.toLowerCase();
-    return hay.includes(query);
-  });
+  const activeSearch = externalSearch !== undefined && externalSearch !== "" ? externalSearch : search;
+
+  const appliedCompanies = useMemo(
+    () => companies.filter((c) => c.applied),
+    [companies]
+  );
+
+  const matchedAppliedByNoticeId = useMemo(() => {
+    const map = new Map<string, CompanyRole>();
+    if (appliedCompanies.length === 0) return map;
+    for (const n of notices) {
+      const hit = appliedCompanies.find((c) => doesNoticeMatchCompany(n.company, c.company));
+      if (hit) map.set(String(n.id), hit);
+    }
+    return map;
+  }, [notices, appliedCompanies]);
+
+  const unreadCount = useMemo(
+    () => notices.filter((n) => !readIds.has(String(n.id))).length,
+    [notices, readIds]
+  );
+  const attachmentCount = useMemo(
+    () => notices.filter((n) => n.has_attachment).length,
+    [notices]
+  );
+  const appliedNoticeCount = matchedAppliedByNoticeId.size;
+
+  const filtered = useMemo(() => {
+    const q = activeSearch.trim().toLowerCase();
+    return notices.filter((n) => {
+      const idStr = String(n.id);
+      if (quickFilter === "unread" && readIds.has(idStr)) return false;
+      if (quickFilter === "attachments" && !n.has_attachment) return false;
+      if (quickFilter === "applied" && !matchedAppliedByNoticeId.has(idStr)) return false;
+
+      if (!q) return true;
+      return (
+        n.company.toLowerCase().includes(q) ||
+        n.category.toLowerCase().includes(q) ||
+        n.notice.toLowerCase().includes(q) ||
+        doesNoticeMatchCompany(n.company, q)
+      );
+    });
+  }, [notices, activeSearch, quickFilter, readIds, matchedAppliedByNoticeId]);
+
+  const toggleExpand = (n: PlacementNotice) => {
+    const id = String(n.id);
+    onMarkRead(id);
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-t border border-b-0 border-slate-200 bg-white px-3 py-2">
-        <span className="text-xs font-bold text-slate-700">
-          Placement Notices ({filtered.length})
-        </span>
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
+    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xs">
+      {/* Search + Mark All Read */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
+        <div className="relative min-w-[170px] flex-1">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
           <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Filter notices…"
-            className="w-40 min-w-0 rounded border border-slate-300 px-2.5 py-1 text-xs text-slate-900 focus:border-blue-600 focus:outline-none sm:w-48"
+            type="text"
+            value={activeSearch}
+            onChange={(e) => {
+              if (externalSearch && onClearExternalSearch) onClearExternalSearch();
+              setSearch(e.target.value);
+            }}
+            placeholder={`Search ${notices.length} placement notices…`}
+            className="w-full rounded-md border border-slate-300 bg-white py-1 pr-7 pl-8 text-xs focus:border-blue-600 focus:outline-none"
           />
-          <button
-            type="button"
-            onClick={onMarkAllRead}
-            className="cursor-pointer rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-          >
-            Mark all read
-          </button>
+          {activeSearch && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearch("");
+                onClearExternalSearch?.();
+              }}
+              aria-label="Clear notice filter"
+              className="absolute top-1/2 right-2 -translate-y-1/2 cursor-pointer text-slate-400 hover:text-slate-600"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
         </div>
+
+        <button
+          type="button"
+          onClick={onMarkAllRead}
+          disabled={unreadCount === 0}
+          className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:border-blue-600 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          <CheckCheck className="h-3.5 w-3.5" />
+          Mark all read {unreadCount > 0 ? `(${unreadCount})` : ""}
+        </button>
       </div>
 
-      <div className="overflow-hidden rounded-b border border-slate-200 bg-white">
-        <table className="w-full table-fixed border-collapse text-left text-xs">
-          <colgroup>
-            <col className="w-[30%]" />
-            <col className="w-[70%]" />
-          </colgroup>
-          <thead>
-            <tr className="border-b-2 border-slate-200 bg-slate-100 text-[10px] font-bold uppercase tracking-wider text-slate-600">
-              <th className="px-3 py-2">From</th>
-              <th className="px-3 py-2">Notice</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.length === 0 ? (
-              <tr>
-                <td colSpan={2} className="py-8 text-center text-slate-400">
-                  No placement notices loaded.
-                </td>
-              </tr>
-            ) : (
-              filtered.map((n) => {
-                const unread = !readIds.has(String(n.id));
-                return (
-                  <tr
-                    key={n.id}
-                    onClick={() => onMarkRead(String(n.id))}
-                    className={`border-b border-slate-200 align-top ${
-                      unread ? "bg-amber-50/50" : "hover:bg-slate-50/80"
-                    }`}
-                  >
-                    <td className="px-3 py-2.5">
-                      <div className="space-y-1.5">
-                        <time className="block text-[10px] font-medium uppercase tracking-wide text-slate-500">
-                          {n.when}
-                        </time>
-                        <div className="break-words text-[13px] font-bold leading-snug text-slate-900">
-                          {n.company || "—"}
-                        </div>
-                        {n.category ? (
-                          <span className="inline-block max-w-full break-words rounded bg-slate-200/80 px-1.5 py-0.5 text-[10px] font-bold leading-tight text-slate-700">
-                            {n.category}
-                          </span>
-                        ) : null}
-                        {n.has_attachment ? (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onOpenAttachment(n.id, n.attachment_year);
-                            }}
-                            className="inline-flex cursor-pointer items-center gap-1 rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
-                            title="Open attachment"
-                          >
-                            <Paperclip className="h-3 w-3 shrink-0" />
-                            PDF
-                          </button>
-                        ) : null}
-                      </div>
-                    </td>
-                    <td className="min-w-0 px-3 py-2.5">{renderNoticeBody(n.notice)}</td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
+      {/* Quick Filter Pills */}
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 bg-white px-3 py-1.5">
+        {(
+          [
+            { id: "all", label: `All (${notices.length})` },
+            { id: "unread", label: `Unread (${unreadCount})` },
+            { id: "attachments", label: `With File (${attachmentCount})` },
+            { id: "applied", label: `My Applied (${appliedNoticeCount})` },
+          ] as Array<{ id: NoticeQuickFilter; label: string }>
+        ).map((pill) => {
+          const active = quickFilter === pill.id;
+          return (
+            <button
+              key={pill.id}
+              type="button"
+              onClick={() => setQuickFilter(pill.id)}
+              className={`cursor-pointer rounded-full px-2.5 py-0.5 text-[11px] font-bold transition ${
+                active
+                  ? "bg-blue-700 text-white shadow-xs"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }`}
+            >
+              {pill.id === "attachments" && (
+                <Paperclip className="mr-1 inline h-2.5 w-2.5 -translate-y-[0.5px]" />
+              )}
+              {pill.label}
+            </button>
+          );
+        })}
       </div>
+
+      {filtered.length > 0 ? (
+        <div className="divide-y divide-slate-100">
+          {filtered.map((n) => {
+            const idStr = String(n.id);
+            const isUnread = !readIds.has(idStr);
+            const isExpanded = expandedIds.has(idStr);
+            const matchedApplied = matchedAppliedByNoticeId.get(idStr);
+
+            return (
+              <div
+                key={`${idStr}-${n.n}`}
+                onClick={() => toggleExpand(n)}
+                className={`cursor-pointer px-3 py-2.5 transition-colors hover:bg-slate-50 ${
+                  matchedApplied
+                    ? "border-l-[3px] border-l-emerald-600 bg-emerald-50/20"
+                    : isUnread
+                      ? "border-l-[3px] border-l-blue-700 bg-blue-50/20"
+                      : ""
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    {isUnread && (
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full bg-blue-700"
+                        title="Unread notice"
+                      />
+                    )}
+                    <span className="text-xs font-bold text-slate-900">{n.company}</span>
+                    {matchedApplied && (
+                      <span
+                        className="inline-flex items-center gap-0.5 rounded bg-emerald-100 px-1.5 py-0.5 text-[9.5px] font-extrabold text-emerald-800"
+                        title={`You applied to ${matchedApplied.company} (${matchedApplied.role})`}
+                      >
+                        <CheckCircle2 className="h-2.5 w-2.5" />
+                        Applied
+                        {matchedApplied.applied_cv ? ` · CV${matchedApplied.applied_cv}` : ""}
+                      </span>
+                    )}
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${categoryPillClass(
+                        n.category
+                      )}`}
+                    >
+                      {n.category}
+                    </span>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {n.has_attachment && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onMarkRead(idStr);
+                          onOpenAttachment({
+                            kind: "NOTICE",
+                            id: idStr,
+                            year: n.attachment_year,
+                            title: `${n.company} — ${n.category}`,
+                            subtitle: `Placement Notice #${idStr}${n.when ? ` · ${n.when}` : ""}`,
+                            filenameStem: `Notice_${idStr}_${n.company}_${n.category}`,
+                          });
+                        }}
+                        className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-blue-300 bg-blue-50 px-2 py-0.5 text-[10px] font-extrabold text-blue-800 shadow-2xs transition hover:border-blue-600 hover:bg-blue-700 hover:text-white"
+                        title="Preview & download official notice attachment from ERP"
+                      >
+                        <FileText className="h-3 w-3" />
+                        Attachment
+                      </button>
+                    )}
+                    <span className="text-[10.5px] whitespace-nowrap text-slate-400">{n.when}</span>
+                  </div>
+                </div>
+
+                {isExpanded ? (
+                  <div className="mt-1.5 rounded-md border border-slate-200 bg-slate-50/90 p-2.5 text-xs leading-relaxed whitespace-pre-wrap text-slate-800">
+                    {renderLinkifiedText(n.notice)}
+                  </div>
+                ) : (
+                  <div className="mt-1 line-clamp-2 text-xs text-slate-600">{n.preview}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="px-3 py-6 text-center text-xs text-slate-400">
+          No placement notices match the current filter.
+        </div>
+      )}
     </div>
   );
 };

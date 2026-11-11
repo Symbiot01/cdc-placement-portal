@@ -3,10 +3,17 @@ import {
   SecuritySlot,
   classifyDeadline,
   decideSecurityAnswer,
+  doesNoticeMatchCompany,
+  formatCtcBreakupText,
+  formatCtcDisplay,
+  hasErpDownloadLink,
   noticeTextFromHtml,
+  prettifyErpRichText,
   prettifyNoticeText,
+  parseComViewHtml,
   parseCompanyRow,
   parseJnfHtml,
+  parseJnfMoreDetHtml,
   parseJqgridXml,
   parseNoticeRow,
   splitGluedUrl,
@@ -145,6 +152,29 @@ describe("ERP XML & HTML parsers", () => {
     expect(splitGluedUrl("https://example.com/register?id=42Students").url).toBe(
       "https://example.com/register?id=42"
     );
+    expect(splitGluedUrl("https://amex.co1.qualtrics.com/jfe/form/SV_8CYM7ewbkEQzIdEApplication")).toEqual({
+      url: "https://amex.co1.qualtrics.com/jfe/form/SV_8CYM7ewbkEQzIdE",
+      tail: "\nApplication",
+    });
+    expect(
+      splitGluedUrl("https://egug.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/26010998AI")
+    ).toEqual({
+      url: "https://egug.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/26010998",
+      tail: "\nAI",
+    });
+    expect(
+      splitGluedUrl("https://egug.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/26015659Important")
+    ).toEqual({
+      url: "https://egug.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/26015659",
+      tail: "\nImportant",
+    });
+    expect(
+      splitGluedUrl(
+        "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/210797409/?utm_medium=jobshare&utm_source=External+Job+Share"
+      ).url
+    ).toBe(
+      "https://jpmc.fa.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1001/job/210797409/?utm_medium=jobshare&utm_source=External+Job+Share"
+    );
     // Preserves balanced parentheses in URLs while stripping outer closing paren
     expect(splitGluedUrl("https://en.wikipedia.org/wiki/C_(programming_language)).")).toEqual({
       url: "https://en.wikipedia.org/wiki/C_(programming_language)",
@@ -178,5 +208,180 @@ describe("ERP XML & HTML parsers", () => {
     const meta = classifyDeadline("2026-10-27 08:00", "2026-10-27 13:30", now);
     expect(meta.is_open).toBe(true);
     expect(meta.urgency).toBe("critical");
+  });
+
+  it("accurately distinguishes real CDC TPNotice/TPJNFDescription downloads from empty anchors", () => {
+    const emptyNoticeAnchor = `<a title='' href='javascript:void(0);' onclick='TPNotice("2026-2027","1567");'></a>`;
+    const realNoticeAnchor = `<a title='Download' href='javascript:void(0);' onclick='TPNotice("2026-2027","1569");'>Download</a>`;
+
+    expect(hasErpDownloadLink(emptyNoticeAnchor)).toBe(false);
+    expect(hasErpDownloadLink(realNoticeAnchor)).toBe(true);
+
+    const rowWithoutAttach = parseNoticeRow(1, [
+      "1567",
+      "PLACEMENT",
+      "Announcement",
+      "IQVIA",
+      "<a>Shortlist notice</a>",
+      "CDC",
+      "21-04-2026 10:00",
+      emptyNoticeAnchor,
+    ]);
+    expect(rowWithoutAttach.has_attachment).toBe(false);
+
+    const rowWithAttach = parseNoticeRow(2, [
+      "1569",
+      "PLACEMENT",
+      "Shortlist",
+      "Airbus India Pvt Ltd",
+      "<a>Shortlisted candidates attached</a>",
+      "CDC",
+      "21-04-2026 14:27",
+      realNoticeAnchor,
+    ]);
+    expect(rowWithAttach.has_attachment).toBe(true);
+    expect(rowWithAttach.id).toBe("1569");
+    expect(rowWithAttach.attachment_year).toBe("2026-2027");
+
+    // Company row where view2/view3 are empty anchors and view1 has real Download
+    const compRow = parseCompanyRow(1, [
+      `<a title="Accenture Japan Ltd" onclick='TPComView("2026-2027","302");'>Accenture Japan Ltd</a>`,
+      `<a title='' href='javascript:void(0);' onclick='TPComDescription("2026-2027","302");'></a>`,
+      `<a title='' href='javascript:void(0);' onclick='TPPPTDescription("2026-2027","302");'></a>`,
+      `<a title="Digital Consultant" onclick='TPJNFView("1","302","2026-2027");'>Digital Consultant</a>`,
+      "",
+      "8214021",
+      "JPY",
+      `<a title='Download' href='javascript:void(0);' onclick='TPJNFDescription("2026-2027","302","1");'>Download</a>`,
+      "Y",
+      "20-04-2026 08:00",
+      "22-04-2026 23:59",
+      "",
+      "No",
+    ]);
+    expect(compRow.has_com_doc).toBe(false);
+    expect(compRow.has_ppt_doc).toBe(false);
+    expect(compRow.has_jnf_doc).toBe(true);
+    expect(compRow.com_id).toBe("302");
+    expect(compRow.jnf_id).toBe("1");
+  });
+
+  it("formats Indian LPA and foreign CTC values cleanly and sorts accurately", () => {
+    const inr = formatCtcDisplay("2459400", "INR");
+    expect(inr.primary).toBe("₹24.59 LPA");
+    expect(inr.secondary).toBe("₹24,59,400");
+    expect(inr.inrSortValue).toBe(2459400);
+
+    const jpy = formatCtcDisplay("8214021", "JPY");
+    expect(jpy.primary).toBe("¥8.21M JPY");
+    expect(jpy.inrSortValue).toBeGreaterThan(4_000_000);
+  });
+
+  it("cross-matches notices to applied company names despite corporate suffixes", () => {
+    expect(doesNoticeMatchCompany("Airbus", "Airbus India Private Limited")).toBe(true);
+    expect(doesNoticeMatchCompany("Accenture Japan", "Accenture Japan Ltd.")).toBe(true);
+    expect(doesNoticeMatchCompany("CDC General", "Airbus India")).toBe(false);
+    expect(doesNoticeMatchCompany("Google", "Microsoft India")).toBe(false);
+  });
+
+  it("parses TPJNFView multi-column headers, separates Allowed Departments, and parses JnfMoreDet & TPComView", () => {
+    const realJnfPage = `
+      <table>
+        <tr><th>Designation</th><th>Job Location</th><th>CTC (in Lakh)</th></tr>
+        <tr><td>AI Scientist</td><td>Bengaluru</td><td>2459400 (INR)</td></tr>
+        <tr><td>Job Description</td></tr>
+        <tr><td>Work on Physical AI robotics &#9679; Foundation models &#9675; Reinforcement learning control loops.</td></tr>
+        <tr><td>View More Details</td></tr>
+        <tr><td><a href="javascript:void(0);" onclick="jnfMoreDet('2026-2027', '22NA30028', '506', '1')">Click Here for more details</a></td></tr>
+        <tr><td>Allowed Departments and degrees</td></tr>
+        <tr><td>CS - Computer Science and Engineering (B.Tech 4Y)</td></tr>
+        <tr><td>NA - Ocean Engineering and Naval Architecture (M.Tech Dual 5Y)</td></tr>
+      </table>
+    `;
+    const parsed = parseJnfHtml(realJnfPage, "506", "1");
+    expect(parsed.fields["Designation"]).toBe("AI Scientist");
+    expect(parsed.fields["Job Location"]).toBe("Bengaluru");
+    expect(parsed.more_details_params).toEqual({
+      year: "2026-2027",
+      rollno: "22NA30028",
+      com_id: "506",
+      jnf_id: "1",
+    });
+    expect(parsed.jd_text).toContain("• Foundation models");
+    expect(parsed.jd_text).toContain("◦ Reinforcement learning");
+    expect(parsed.jd_text).not.toContain("Ocean Engineering");
+    expect(parsed.allowed_departments).toHaveLength(2);
+
+    const moreDetHtml = `
+      <h4>Job Profile</h4>
+      <table>
+        <thead><tr><th>Form Type</th><th>Designation</th><th>Cost to Company per year</th></tr></thead>
+        <tbody><tr><td>PLACEMENT</td><td>Software Development Engineer I</td><td>4838500 INR</td></tr></tbody>
+      </table>
+      <h4>Job Description</h4>
+      <div>Build distributed cloud services &#9679; High scale systems &#9675; Low latency storage</div>
+      <h4>Other Details</h4>
+      <div class="row">
+        <div class="col-xs-3 text-left"><div>CTC Breakup :</div></div>
+        <div class="col-xs-3"><div><b>Base Pay (INR) 2,030,000 Sign-on Bonus Year 1 (INR) 643,500 Sign-on Bonus Year 2 (INR) 579,000 Restricted Stock Unit Value (RSU) (4 years) * (INR) 1,586,000 INR</b></div></div>
+        <div class="col-xs-3 text-left"><div>Base Salary :</div></div>
+        <div class="col-xs-3"><div><b>4800000</b></div></div>
+        <div class="col-xs-3 text-left"><div>Joining Bonus, if any :</div></div>
+        <div class="col-xs-3"><div><b>500000</b></div></div>
+      </div>
+      <div class="row">
+        <div class="col-xs-3 text-left"><div>Bonds :</div></div>
+        <div class="col-xs-3"><div><b>No</b></div></div>
+        <div class="col-xs-3 text-left"><div>Bond Duration :</div></div>
+        <div class="col-xs-3"><div><b></b></div></div>
+        <div class="col-xs-3 text-left"><div>Bond Amount :</div></div>
+        <div class="col-xs-3"><div><b>0</b></div></div>
+      </div>
+      <div class="row">
+        <div class="col-xs-3 text-left"><div>Is there a CGPA Criteria? :</div></div>
+        <div class="col-xs-3"><div><b>Yes</b></div></div>
+        <div class="col-xs-3 text-left"><div>If Yes, minimum CGPA required :</div></div>
+        <div class="col-xs-3"><div><b>6.5</b></div></div>
+      </div>
+      <h4>Selection Details</h4>
+      <div class="row">
+        <div class="col-xs-3 text-left"><div>Shortlist from resumes :</div></div>
+        <div class="col-xs-3"><div><b>No</b></div></div>
+        <div class="col-xs-3 text-left"><div>Written Test :</div></div>
+        <div class="col-xs-3"><div><b>Yes</b></div></div>
+        <div class="col-xs-3 text-left"><div>If Yes, Mode :</div></div>
+        <div class="col-xs-3"><div><b>Online</b></div></div>
+      </div>
+    `;
+    const more = parseJnfMoreDetHtml(moreDetHtml);
+    expect(more.job_profile["Designation"]).toBe("Software Development Engineer I");
+    expect(more.job_description).toContain("• High scale systems");
+    expect(more.compensation_details["Base Salary"]).toBe("4800000");
+    expect(more.compensation_details["Joining Bonus"]).toBe("500000");
+    expect(more.compensation_details["CTC Breakup"]).toContain("• Sign-on Bonus Year 1");
+    expect(more.eligibility_details["Bond / Service Contract"]).toBe("No");
+    expect(more.eligibility_details["CGPA Criteria"]).toBe("Yes (Minimum CGPA: 6.5)");
+    expect(more.selection_details["Shortlist from resumes"]).toBe("No");
+    expect(more.selection_details["Written Test"]).toBe("Yes (Online)");
+
+    // Pipe & comma CTC breakup formatters + ERP 500 error guard
+    expect(
+      formatCtcBreakupText("Fixed 2222222 | Performance Bonus 177778 | Total CTC 2400000")
+    ).toContain("\n• Performance Bonus 177778");
+    expect(
+      prettifyErpRichText("AI: * Design of vision models. * Development of segmentation pipelines.")
+    ).toContain("\n• Design of vision models.");
+    expect(parseJnfMoreDetHtml("<html><body>500 Internal Server</body></html>").compensation_details).toEqual({});
+
+    const comHtml = `
+      <table>
+        <tr><td>Company</td><td>Accenture Japan Ltd</td></tr>
+        <tr><td>Industry Sector</td><td>IT Consulting</td></tr>
+        <tr><td>Website</td><td>http://https://www.accenture.com/jp-ja</td></tr>
+      </table>
+    `;
+    const com = parseComViewHtml(comHtml);
+    expect(com["Company"]).toBe("Accenture Japan Ltd");
+    expect(com["Website"]).toBe("https://www.accenture.com/jp-ja");
   });
 });

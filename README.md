@@ -27,8 +27,9 @@ Then open **[http://127.0.0.1:5173](http://127.0.0.1:5173)** in your browser, cl
 Privacy and credential isolation are the top priorities of this project:
 
 - **100% Client-Side ERP Authentication:** Your roll number, ERP password, security question answers, email OTP, and ERP session cookies stay strictly inside your browser (`localStorage` and browser cookie jar).
+- **Optional Gmail OTP auto-fill:** If you connect Gmail in Edit login, the browser reads only a recent ERP one-time code from that inbox. The Google access token stays in `sessionStorage` and is never sent to this portal's server. The saved value is the Gmail address, so the same account can be reused on the next login.
 - **Direct Browser-to-ERP Traffic:** All login, role fetching, JD viewing, and CV application/cancellation requests go directly from your browser extension to `https://erp.iitkgp.ac.in`. The extension strictly blocks outbound requests to any other domain.
-- **Zero-Credential Backend Boundary:** The backend API explicitly inspects and rejects (`HTTP 400`) any request payload containing credential fields (`rollno`, `password`, `security_answers`, `answer`, `otp`, `ssotoken`, `cookies`).
+- **Zero-Credential Backend Boundary:** The backend API explicitly inspects and rejects (`HTTP 400`) any request payload containing credential fields (`rollno`, `password`, `security_answers`, `answer`, `otp`, `ssotoken`, `cookies`, `access_token`, `refresh_token`).
 - **No Raw Roll Number Storage:** Even if you opt into AI features, your roll number is never stored on the server—only a one-way SHA-256 digest and a cryptographic `cvset_hash` of your 3 CVs are used to bind your cache session.
 
 ---

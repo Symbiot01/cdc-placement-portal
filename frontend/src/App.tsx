@@ -4,7 +4,9 @@ import { toast } from "sonner";
 import { CompanyRole, CvNumber, JnfDetails, LoginProfile, PlacementNotice } from "./lib/erpParsers";
 import {
   erpClient,
+  ErpAttachmentRequest,
   ExtensionBridgeSnapshot,
+  ResolvedErpAttachment,
   readExtensionBridge,
 } from "./lib/erpBridge";
 import {
@@ -16,14 +18,26 @@ import {
   syncConsentedCdcSnapshot,
 } from "./lib/matcherApi";
 import {
+  GmailAuthError,
+  getGmailClientId,
+  isAbortError,
+  loadGoogleIdentityScript,
+  pollForErpOtp,
+  requestGmailToken,
+  snapshotRecentOtpMessageIds,
+} from "./lib/gmailOtp";
+import {
+  GmailOtpAccount,
   LocalAiCacheState,
   hasUsableLoginProfile,
   loadAppliedCvMap,
+  loadGmailOtpAccount,
   loadLocalAiCache,
   loadLoginProfile,
   loadReadNoticeIds,
   loadServerDataConsent,
   saveAppliedCvMap,
+  saveGmailOtpAccount,
   saveLocalAiCache,
   saveLoginProfile,
   saveReadNoticeIds,
@@ -37,6 +51,7 @@ import { DataConsentModal } from "./components/DataConsentModal";
 import { RolesSheet } from "./components/RolesSheet";
 import { NoticesSheet } from "./components/NoticesSheet";
 import { JdModal } from "./components/JdModal";
+import { AttachmentViewerModal } from "./components/AttachmentViewerModal";
 
 export const App: React.FC = () => {
   const [profile, setProfile] = useState<LoginProfile>(() => loadLoginProfile());
@@ -49,6 +64,18 @@ export const App: React.FC = () => {
   });
   const [sendingOtp, setSendingOtp] = useState(false);
   const [verifyingOtp, setVerifyingOtp] = useState(false);
+  const [resumingSession, setResumingSession] = useState(false);
+  const [readingGmailOtp, setReadingGmailOtp] = useState(false);
+  const [suggestedOtp, setSuggestedOtp] = useState("");
+  const [gmailAccount, setGmailAccount] = useState<GmailOtpAccount>(() => loadGmailOtpAccount());
+  const gmailPollRef = useRef<AbortController | null>(null);
+  const verifyLockRef = useRef(false);
+  const attemptedResumeRef = useRef(false);
+  const sessionGenerationRef = useRef(0);
+  const lastOtpAttemptRef = useRef<{
+    notBeforeMs: number;
+    baselineIds?: ReadonlySet<string>;
+  } | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [smartBusy, setSmartBusy] = useState(false);
   const [aiWarmingUp, setAiWarmingUp] = useState(false);
@@ -80,6 +107,55 @@ export const App: React.FC = () => {
   const [activeJdDetails, setActiveJdDetails] = useState<JnfDetails | null>(null);
   const [jdLoading, setJdLoading] = useState(false);
   const [jdRecLoading, setJdRecLoading] = useState(false);
+
+  const [mobileTab, setMobileTab] = useState<"roles" | "notices">("roles");
+  const [noticeCompanyFilter, setNoticeCompanyFilter] = useState("");
+
+  const [attachmentModalOpen, setAttachmentModalOpen] = useState(false);
+  const [attachmentRequest, setAttachmentRequest] = useState<ErpAttachmentRequest | null>(null);
+  const [attachmentResolved, setAttachmentResolved] = useState<ResolvedErpAttachment | null>(
+    null
+  );
+  const [attachmentLoading, setAttachmentLoading] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const attachmentReqGenRef = useRef(0);
+
+  const handleOpenAttachment = useCallback((req: ErpAttachmentRequest) => {
+    const gen = ++attachmentReqGenRef.current;
+    setAttachmentRequest(req);
+    setAttachmentResolved(null);
+    setAttachmentError(null);
+    setAttachmentLoading(true);
+    setAttachmentModalOpen(true);
+
+    erpClient
+      .fetchAttachment(req)
+      .then((res) => {
+        if (gen !== attachmentReqGenRef.current) return;
+        setAttachmentResolved(res);
+      })
+      .catch((err: unknown) => {
+        if (gen !== attachmentReqGenRef.current) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        setAttachmentError(msg);
+      })
+      .finally(() => {
+        if (gen === attachmentReqGenRef.current) {
+          setAttachmentLoading(false);
+        }
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!gmailAccount.enabled || !getGmailClientId()) return;
+    void loadGoogleIdentityScript().catch(() => undefined);
+  }, [gmailAccount.enabled]);
+
+  useEffect(() => {
+    return () => {
+      gmailPollRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -374,41 +450,63 @@ export const App: React.FC = () => {
     [mergeServerAiPayload, prepareConsentedCvSyncPayload]
   );
 
-  const handleSendOtp = async () => {
-    if (bridge.status !== "connected") {
-      toast.error("Install or update the ERP bridge extension, then reload this page.");
-      return;
-    }
-    if (!hasUsableLoginProfile(profile)) {
-      setLoginModalOpen(true);
-      return;
-    }
-    setSendingOtp(true);
-    try {
-      const res = await erpClient.sendOtp(profile);
-      setStage("otp_sent");
-      toast.success(res.message || `OTP requested for ${res.rollno}. Check your email.`);
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      toast.error(`Send OTP failed: ${msg}`);
-      if (msg.toLowerCase().includes("edit login")) {
-        setLoginModalOpen(true);
-      }
-    } finally {
-      setSendingOtp(false);
-    }
-  };
+  useEffect(() => {
+    if (bridge.status !== "connected") return;
+    if (stage !== "uninitialized") return;
+    if (attemptedResumeRef.current) return;
 
-  const handleVerifyOtp = async (otp: string) => {
+    attemptedResumeRef.current = true;
+    const gen = sessionGenerationRef.current;
+    setResumingSession(true);
+
+    void erpClient
+      .tryResumeSession(profile.rollno)
+      .then((resumed) => {
+        if (!resumed || gen !== sessionGenerationRef.current) return;
+        const merged = mergeAppliedCvs(resumed.companies, appliedCvMap);
+        setStage("authenticated");
+        setSuggestedOtp("");
+        setCompanies(merged);
+        setNotices(resumed.notices);
+        toast.success(`Resumed active CDC session as ${resumed.rollno}. Loaded ${merged.length} roles.`);
+        hydrateAppliedCvNumbersInBackground(merged, appliedCvMap);
+        syncToBackendIfConsented(merged, resumed.notices, serverConsent);
+      })
+      .finally(() => {
+        if (gen === sessionGenerationRef.current) {
+          setResumingSession(false);
+        }
+      });
+  }, [
+    appliedCvMap,
+    bridge.status,
+    hydrateAppliedCvNumbersInBackground,
+    mergeAppliedCvs,
+    profile.rollno,
+    serverConsent,
+    stage,
+    syncToBackendIfConsented,
+  ]);
+
+  const handleVerifyOtp = async (otp: string, profileOverride?: LoginProfile) => {
+    if (verifyLockRef.current) return;
+    verifyLockRef.current = true;
+    sessionGenerationRef.current += 1;
+    setResumingSession(false);
+    gmailPollRef.current?.abort();
     if (bridge.status !== "connected") {
+      verifyLockRef.current = false;
       toast.error("Install or update the ERP bridge extension, then reload this page.");
       return;
     }
+    const activeProfile = profileOverride || profile;
     setVerifyingOtp(true);
     try {
-      const res = await erpClient.verifyOtpAndOpenCdc(profile, otp);
+      const res = await erpClient.verifyOtpAndOpenCdc(activeProfile, otp);
       const merged = mergeAppliedCvs(res.companies, appliedCvMap);
       setStage("authenticated");
+      setSuggestedOtp("");
+      lastOtpAttemptRef.current = null;
       setCompanies(merged);
       setNotices(res.notices);
       toast.success(`Logged into CDC as ${res.rollno}. Loaded ${merged.length} roles.`);
@@ -417,7 +515,139 @@ export const App: React.FC = () => {
     } catch (err: any) {
       toast.error(`OTP verification failed: ${err?.message || String(err)}`);
     } finally {
+      verifyLockRef.current = false;
       setVerifyingOtp(false);
+    }
+  };
+
+  const handleSendOtp = async (opts?: {
+    forceManual?: boolean;
+    profileOverride?: LoginProfile;
+  }) => {
+    if (bridge.status !== "connected") {
+      toast.error("Install or update the ERP bridge extension, then reload this page.");
+      return;
+    }
+    const activeProfile = opts?.profileOverride || profile;
+    if (!hasUsableLoginProfile(activeProfile)) {
+      setLoginModalOpen(true);
+      return;
+    }
+
+    const clientIdReady = Boolean(getGmailClientId());
+    const useGmail =
+      !opts?.forceManual &&
+      gmailAccount.enabled &&
+      Boolean(gmailAccount.email) &&
+      clientIdReady;
+
+    if (!opts?.forceManual && gmailAccount.enabled && !useGmail) {
+      toast.message(
+        clientIdReady
+          ? "Connect Gmail in Edit login to auto-fill the OTP. Sending manual OTP instead."
+          : "VITE_GMAIL_CLIENT_ID is not configured yet. Sending manual OTP instead."
+      );
+    }
+
+    // Must invoke requestGmailToken synchronously inside the user click gesture so browsers never block OAuth popups.
+    const accessPromise = useGmail ? requestGmailToken({ interactive: true }) : null;
+
+    sessionGenerationRef.current += 1;
+    setResumingSession(false);
+    gmailPollRef.current?.abort();
+    const pollController = new AbortController();
+    gmailPollRef.current = pollController;
+    setSendingOtp(true);
+    let otpRequested = false;
+
+    try {
+      let accessToken = "";
+      let baselineIds: Set<string> | undefined;
+
+      if (accessPromise) {
+        const access = await accessPromise;
+        accessToken = access.accessToken;
+        if (access.email && access.email !== gmailAccount.email) {
+          setGmailAccount(saveGmailOtpAccount({ enabled: true, email: access.email }));
+        }
+        baselineIds = await snapshotRecentOtpMessageIds(
+          accessToken,
+          pollController.signal
+        ).catch(() => undefined);
+      }
+
+      const sendStartedAtMs = Date.now();
+      const res = await erpClient.sendOtp(activeProfile);
+      otpRequested = true;
+      const notBeforeMs = sendStartedAtMs - 15_000;
+      lastOtpAttemptRef.current = { notBeforeMs, baselineIds };
+      setStage("otp_sent");
+
+      if (!accessPromise || !accessToken) {
+        toast.success(res.message || `OTP requested for ${res.rollno}. Check your email.`);
+        return;
+      }
+
+      setSendingOtp(false);
+      setReadingGmailOtp(true);
+      const otp = await pollForErpOtp({
+        accessToken,
+        notBeforeMs,
+        excludeMessageIds: baselineIds,
+        signal: pollController.signal,
+      });
+      setSuggestedOtp(otp);
+      setReadingGmailOtp(false);
+      await handleVerifyOtp(otp, activeProfile);
+    } catch (err: unknown) {
+      if (isAbortError(err)) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof GmailAuthError) {
+        setLoginModalOpen(true);
+        toast.error(msg);
+        return;
+      }
+      if (!otpRequested) {
+        toast.error(`Login failed: ${msg}`);
+        if (msg.toLowerCase().includes("edit login")) setLoginModalOpen(true);
+        return;
+      }
+      toast.error(msg);
+    } finally {
+      setSendingOtp(false);
+      setReadingGmailOtp(false);
+    }
+  };
+
+  const handleRecheckGmail = async () => {
+    if (stage !== "otp_sent") return;
+    if (!gmailAccount.enabled || !gmailAccount.email || !getGmailClientId()) return;
+
+    const accessPromise = requestGmailToken({ interactive: true });
+    gmailPollRef.current?.abort();
+    const pollController = new AbortController();
+    gmailPollRef.current = pollController;
+    setReadingGmailOtp(true);
+
+    try {
+      const access = await accessPromise;
+      const attempt = lastOtpAttemptRef.current;
+      const otp = await pollForErpOtp({
+        accessToken: access.accessToken,
+        notBeforeMs: attempt?.notBeforeMs ?? Date.now() - 5 * 60_000,
+        excludeMessageIds: attempt?.baselineIds,
+        signal: pollController.signal,
+        timeoutMs: 30_000,
+      });
+      setSuggestedOtp(otp);
+      setReadingGmailOtp(false);
+      await handleVerifyOtp(otp);
+    } catch (err: unknown) {
+      if (isAbortError(err)) return;
+      if (err instanceof GmailAuthError) setLoginModalOpen(true);
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReadingGmailOtp(false);
     }
   };
 
@@ -426,7 +656,7 @@ export const App: React.FC = () => {
     try {
       const [freshCompanies, freshNotices] = await Promise.all([
         erpClient.fetchCompanies(),
-        erpClient.fetchNotices(50, true),
+        erpClient.fetchNotices(100, true),
       ]);
       const merged = mergeAppliedCvs(freshCompanies, appliedCvMap);
       setCompanies(merged);
@@ -442,6 +672,9 @@ export const App: React.FC = () => {
   };
 
   const handleLogout = async () => {
+    sessionGenerationRef.current += 1;
+    gmailPollRef.current?.abort();
+    setResumingSession(false);
     await erpClient.logout();
     setStage("uninitialized");
     setCompanies([]);
@@ -669,7 +902,13 @@ export const App: React.FC = () => {
     setJdLoading(true);
     let loadedDetails: JnfDetails | null = null;
     try {
-      const details = await erpClient.fetchJnf(role.com_id, role.jnf_id, role.yop);
+      const details = await erpClient.fetchJnf(
+        role.com_id,
+        role.jnf_id,
+        role.yop,
+        false,
+        true
+      );
       loadedDetails = details;
       setActiveJdDetails(details);
     } catch (err: any) {
@@ -727,6 +966,7 @@ export const App: React.FC = () => {
 
   const rolesSheetProps = {
     companies,
+    notices,
     selectedKeys,
     smartBusy,
     aiWarmingUp,
@@ -755,11 +995,19 @@ export const App: React.FC = () => {
     onCancelRole: handleCancelRole,
     onSmartApplySelected: handleSmartApplySelected,
     onOpenJd: handleOpenJd,
+    onOpenAttachment: handleOpenAttachment,
+    onFilterNoticesByCompany: (companyName: string) => {
+      setNoticeCompanyFilter(companyName);
+      setMobileTab("notices");
+    },
   };
 
   const noticesSheetProps = {
     notices,
+    companies,
     readIds: readNoticeIds,
+    externalSearch: noticeCompanyFilter,
+    onClearExternalSearch: () => setNoticeCompanyFilter(""),
     onMarkRead: (id: string) => {
       setReadNoticeIds((prev) => {
         if (prev.has(id)) return prev;
@@ -775,17 +1023,18 @@ export const App: React.FC = () => {
       setReadNoticeIds(next);
       saveReadNoticeIds(next);
     },
-    onOpenAttachment: (noticeId: string, year: string) => {
-      erpClient.openNoticeAttachment(noticeId, year).catch((err) => {
-        toast.error(`Attachment open failed: ${err?.message || String(err)}`);
-      });
-    },
+    onOpenAttachment: handleOpenAttachment,
   };
+
+  const activeRollno =
+    stage === "authenticated"
+      ? erpClient.getSessionState().rollno || profile.rollno
+      : profile.rollno;
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
       <Header
-        rollno={stage === "authenticated" ? erpClient.getSessionState().rollno || profile.rollno : profile.rollno}
+        rollno={activeRollno}
         stage={stage}
         bridge={bridge}
         hasSavedLogin={hasUsableLoginProfile(profile)}
@@ -793,8 +1042,20 @@ export const App: React.FC = () => {
         isRefreshing={isRefreshing}
         cvDiffs={serverConsent ? aiCache.cv_diffs : null}
         onOpenCv={(cv) => {
-          erpClient.openCvPreview(cv).catch((err) => {
-            toast.error(`Could not open CV${cv}: ${err?.message || String(err)}`);
+          handleOpenAttachment({
+            kind: "CV",
+            cv,
+            title: `CV${cv} Preview${activeRollno ? ` (${activeRollno})` : ""}`,
+            subtitle: "Generated directly from IIT KGP ERP",
+            filenameStem: `${activeRollno || "Student"}_CV${cv}`,
+          });
+        }}
+        onOpenGuidelines={() => {
+          handleOpenAttachment({
+            kind: "GUID",
+            title: "CDC Placement Guidelines (2026–2027)",
+            subtitle: "Official Career Development Centre guidelines document",
+            filenameStem: "CDC_Placement_Guidelines_2026_2027",
           });
         }}
         onRefresh={handleRefresh}
@@ -808,17 +1069,32 @@ export const App: React.FC = () => {
       <OtpStrip
         authenticated={stage === "authenticated"}
         stage={stage}
+        resumingSession={resumingSession}
         hasSavedLogin={hasUsableLoginProfile(profile)}
         rollno={profile.rollno}
         sendingOtp={sendingOtp}
         verifyingOtp={verifyingOtp}
+        readingGmailOtp={readingGmailOtp}
+        gmailAutoReady={
+          gmailAccount.enabled && Boolean(gmailAccount.email) && Boolean(getGmailClientId())
+        }
+        gmailEnabled={gmailAccount.enabled}
+        gmailEmail={gmailAccount.email}
+        suggestedOtp={suggestedOtp}
         bridgeReady={bridge.status === "connected"}
         onSetupLogin={() => setLoginModalOpen(true)}
-        onSendOtp={handleSendOtp}
-        onVerifyOtp={handleVerifyOtp}
+        onSendOtp={(opts) => {
+          void handleSendOtp(opts);
+        }}
+        onRecheckGmail={() => {
+          void handleRecheckGmail();
+        }}
+        onVerifyOtp={(otp) => {
+          void handleVerifyOtp(otp);
+        }}
       />
 
-      <main className="w-full py-2.5">
+      <main className="mx-auto w-full max-w-[1680px] px-2.5 py-2.5 sm:px-3.5">
         {isLaptopUp ? (
           <div className="grid grid-cols-2 items-start gap-3">
             <div className="min-w-0">
@@ -829,7 +1105,10 @@ export const App: React.FC = () => {
             </div>
           </div>
         ) : (
-          <Tabs.Root defaultValue="roles">
+          <Tabs.Root
+            value={mobileTab}
+            onValueChange={(v) => setMobileTab(v === "notices" ? "notices" : "roles")}
+          >
             <Tabs.List className="mb-2 flex items-center gap-1 border-b-2 border-slate-200">
               <Tabs.Trigger
                 value="roles"
@@ -876,9 +1155,16 @@ export const App: React.FC = () => {
           }
           return erpClient.fetchAllSecurityQuestions(roll);
         }}
+        gmailAccount={gmailAccount}
+        onGmailAccountChange={setGmailAccount}
         onSaveProfile={(nextProfile, rememberSecrets) => {
           const saved = saveLoginProfile(nextProfile, rememberSecrets);
           setProfile(saved);
+        }}
+        onSaveAndLogin={(nextProfile, rememberSecrets) => {
+          const saved = saveLoginProfile(nextProfile, rememberSecrets);
+          setProfile(saved);
+          void handleSendOtp({ profileOverride: saved });
         }}
       />
 
@@ -919,6 +1205,25 @@ export const App: React.FC = () => {
         recommendationLoading={jdRecLoading}
         cvDiffs={serverConsent ? aiCache.cv_diffs : null}
         onApplyRole={(r, cv) => handleApplyRole(r, cv)}
+        onOpenAttachment={handleOpenAttachment}
+      />
+
+      <AttachmentViewerModal
+        open={attachmentModalOpen}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) {
+            attachmentReqGenRef.current += 1;
+            setAttachmentLoading(false);
+          }
+          setAttachmentModalOpen(nextOpen);
+        }}
+        request={attachmentRequest}
+        resolved={attachmentResolved}
+        loading={attachmentLoading}
+        error={attachmentError}
+        onRetry={() => {
+          if (attachmentRequest) handleOpenAttachment(attachmentRequest);
+        }}
       />
     </div>
   );
