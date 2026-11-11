@@ -43,8 +43,16 @@ import {
   saveReadNoticeIds,
   saveServerDataConsent,
 } from "./lib/storage";
+import {
+  ClassifiedErpError,
+  ErpFailureInfo,
+  RecoveryAction,
+  classifyErpError,
+  explainErpFailure,
+} from "./lib/erpSessionGuard";
 import { Header } from "./components/Header";
 import { ExtensionStatusBanner } from "./components/ExtensionStatusBanner";
+import { SessionRecoveryBanner } from "./components/SessionRecoveryBanner";
 import { OtpStrip } from "./components/OtpStrip";
 import { LoginModal } from "./components/LoginModal";
 import { DataConsentModal } from "./components/DataConsentModal";
@@ -80,6 +88,23 @@ export const App: React.FC = () => {
   const [smartBusy, setSmartBusy] = useState(false);
   const [aiWarmingUp, setAiWarmingUp] = useState(false);
   const aiSyncPromiseRef = useRef<Promise<void> | null>(null);
+
+  /** Single, actionable ERP failure shown to the user (null = healthy). */
+  const [erpFailure, setErpFailure] = useState<ErpFailureInfo | null>(null);
+  const [recovering, setRecovering] = useState(false);
+  const recoveringRef = useRef(false);
+  /** Late-bound handleSendOtp so recovery can be defined before it. */
+  const sendOtpRef = useRef<
+    (opts?: { forceManual?: boolean; profileOverride?: LoginProfile }) => Promise<void>
+  >(async () => undefined);
+
+  /**
+   * Turns any ERP failure into (a) a plain-language banner and (b) an automatic
+   * UI downgrade, so the portal never shows `authenticated` over a dead session.
+   */
+  const reportErpFailureRef = useRef<(err: unknown) => ErpFailureInfo>(() =>
+    explainErpFailure("unknown")
+  );
 
   const [companies, setCompanies] = useState<CompanyRole[]>([]);
   const [notices, setNotices] = useState<PlacementNotice[]>([]);
@@ -211,10 +236,22 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     if (stage !== "authenticated") return;
+    let cancelled = false;
     const id = window.setInterval(() => {
-      erpClient.keepalive().catch(() => undefined);
+      void erpClient.keepalive().catch((err: unknown) => {
+        if (cancelled) return;
+        // ERP dropped the session while the tab sat idle. Downgrade the UI
+        // instead of leaving a stale `On` badge over an empty workspace.
+        const failure = reportErpFailureRef.current(err);
+        if (failure.code === "auth_landing") {
+          toast.message("Your ERP session expired. Sign in again to keep working.");
+        }
+      });
     }, 25 * 60 * 1000);
-    return () => window.clearInterval(id);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
   }, [stage]);
 
   const updateAiCache = useCallback(
@@ -488,6 +525,104 @@ export const App: React.FC = () => {
     syncToBackendIfConsented,
   ]);
 
+  const reportErpFailure = useCallback((err: unknown): ClassifiedErpError => {
+    const failure = classifyErpError(err);
+    setErpFailure(failure);
+    if (failure.code === "auth_landing" || failure.code === "session_stale") {
+      // ERP dropped us: drop local data too so the UI cannot lie.
+      setStage("uninitialized");
+      setCompanies([]);
+      setNotices([]);
+      setSelectedKeys(new Set());
+      setSuggestedOtp("");
+    }
+    return failure;
+  }, []);
+
+  useEffect(() => {
+    reportErpFailureRef.current = reportErpFailure;
+  }, [reportErpFailure]);
+
+  /**
+   * Runs the fix that matches a failure: purge ERP state, then optionally
+   * continue straight into a fresh login so the user only tapped once.
+   */
+  const handleRecoverErp = useCallback(
+    async (action: RecoveryAction) => {
+      if (recoveringRef.current) return;
+      recoveringRef.current = true;
+      setRecovering(true);
+      sessionGenerationRef.current += 1;
+      gmailPollRef.current?.abort();
+      try {
+        if (action === "resend_otp" || action === "clean_login") {
+          await erpClient.resetSession();
+          setStage("uninitialized");
+          setCompanies([]);
+          setNotices([]);
+          setSelectedKeys(new Set());
+          setSuggestedOtp("");
+          lastOtpAttemptRef.current = null;
+        } else if (action === "sign_in") {
+          await erpClient.resetSession();
+          setStage("uninitialized");
+          setSuggestedOtp("");
+        }
+
+        setErpFailure(null);
+
+        if (!hasUsableLoginProfile(profile)) {
+          setLoginModalOpen(true);
+          return;
+        }
+
+        // Continue the journey automatically: the user already expressed
+        // intent by tapping recovery, so do not make them tap twice.
+        await sendOtpRef.current({ forceManual: !gmailAccount.enabled });
+      } catch (err) {
+        setErpFailure(classifyErpError(err));
+      } finally {
+        recoveringRef.current = false;
+        setRecovering(false);
+      }
+    },
+    [gmailAccount.enabled, profile]
+  );
+
+  /**
+   * Catches the "badge says On but ERP already dropped us" case: whenever the
+   * user returns to the tab we quietly re-validate. If ERP expired the session
+   * while the tab was backgrounded, the UI downgrades before any action fails.
+   */
+  useEffect(() => {
+    if (stage !== "authenticated") return;
+    if (bridge.status !== "connected") return;
+    let cancelled = false;
+
+    const revalidate = async () => {
+      if (document.visibilityState !== "visible") return;
+      const alive = await erpClient.isSessionAlive();
+      if (cancelled || alive) return;
+      if (erpClient.getSessionState().stage === "authenticated") return;
+      setStage("uninitialized");
+      setCompanies([]);
+      setNotices([]);
+      setSelectedKeys(new Set());
+      setSuggestedOtp("");
+      setErpFailure(explainErpFailure("session_stale"));
+    };
+
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void revalidate();
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [bridge.status, stage]);
+
   const handleVerifyOtp = async (otp: string, profileOverride?: LoginProfile) => {
     if (verifyLockRef.current) return;
     verifyLockRef.current = true;
@@ -512,8 +647,13 @@ export const App: React.FC = () => {
       toast.success(`Logged into CDC as ${res.rollno}. Loaded ${merged.length} roles.`);
       hydrateAppliedCvNumbersInBackground(merged, appliedCvMap);
       syncToBackendIfConsented(merged, res.notices, serverConsent);
-    } catch (err: any) {
-      toast.error(`OTP verification failed: ${err?.message || String(err)}`);
+    } catch (err: unknown) {
+      const failure = reportErpFailure(err);
+      // The banner is the single source of truth for recoverable failures, so
+      // only use a toast when there is no actionable button to show.
+      if (failure.action === "none") {
+        toast.error(failure.title);
+      }
     } finally {
       verifyLockRef.current = false;
       setVerifyingOtp(false);
@@ -540,6 +680,35 @@ export const App: React.FC = () => {
       gmailAccount.enabled &&
       Boolean(gmailAccount.email) &&
       clientIdReady;
+
+    // Reuse before request: if this browser already holds a *verified valid*
+    // CDC session for the same roll number, just use it. Most "OTP never
+    // matches" reports are really "you were already logged in".
+    // Only attempted from a clean state so a pending OTP is never disturbed.
+    if (stage === "uninitialized") {
+      setSendingOtp(true);
+      try {
+        const resumed = await erpClient.tryResumeSession(activeProfile.rollno);
+        if (resumed) {
+          const merged = mergeAppliedCvs(resumed.companies, appliedCvMap);
+          setStage("authenticated");
+          setSuggestedOtp("");
+          setCompanies(merged);
+          setNotices(resumed.notices);
+          setErpFailure(null);
+          toast.success(
+            `Already signed in as ${resumed.rollno}. Loaded ${merged.length} roles — no OTP needed.`
+          );
+          hydrateAppliedCvNumbersInBackground(merged, appliedCvMap);
+          syncToBackendIfConsented(merged, resumed.notices, serverConsent);
+          return;
+        }
+      } catch {
+        /* fall through to a normal OTP login */
+      } finally {
+        setSendingOtp(false);
+      }
+    }
 
     if (!opts?.forceManual && gmailAccount.enabled && !useGmail) {
       toast.message(
@@ -601,23 +770,31 @@ export const App: React.FC = () => {
       await handleVerifyOtp(otp, activeProfile);
     } catch (err: unknown) {
       if (isAbortError(err)) return;
-      const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof GmailAuthError) {
         setLoginModalOpen(true);
-        toast.error(msg);
+        toast.error(err.message);
         return;
       }
+      const failure = reportErpFailure(err);
       if (!otpRequested) {
-        toast.error(`Login failed: ${msg}`);
-        if (msg.toLowerCase().includes("edit login")) setLoginModalOpen(true);
+        // Login never even reached the OTP step: this is the session-conflict
+        // case users hit most often, so keep the recovery banner prominent.
+        if (failure.rawMessage.toLowerCase().includes("edit login")) setLoginModalOpen(true);
+        if (failure.action === "none") toast.error(failure.detail);
         return;
       }
-      toast.error(msg);
+      if (failure.action === "none") toast.error(failure.title);
     } finally {
       setSendingOtp(false);
       setReadingGmailOtp(false);
     }
   };
+
+  // Keep the late-bound reference current so recovery can always trigger a
+  // fresh OTP request without a stale closure.
+  useEffect(() => {
+    sendOtpRef.current = handleSendOtp;
+  });
 
   const handleRecheckGmail = async () => {
     if (stage !== "otp_sent") return;
@@ -661,11 +838,15 @@ export const App: React.FC = () => {
       const merged = mergeAppliedCvs(freshCompanies, appliedCvMap);
       setCompanies(merged);
       setNotices(freshNotices);
+      setErpFailure(null);
       toast.success("Synced live placement data from ERP.");
       hydrateAppliedCvNumbersInBackground(merged, appliedCvMap);
       syncToBackendIfConsented(merged, freshNotices, serverConsent);
-    } catch (err: any) {
-      toast.error(`Refresh failed: ${err?.message || String(err)}`);
+    } catch (err: unknown) {
+      const failure = reportErpFailure(err);
+      if (failure.action === "none") {
+        toast.error(`Refresh failed: ${failure.rawMessage || failure.detail}`);
+      }
     } finally {
       setIsRefreshing(false);
     }
@@ -680,6 +861,7 @@ export const App: React.FC = () => {
     setCompanies([]);
     setNotices([]);
     setSelectedKeys(new Set());
+    setErpFailure(null);
     toast.success("Logged out of ERP.");
   };
 
@@ -720,9 +902,11 @@ export const App: React.FC = () => {
         }
         toast.success(`Applied to ${role.company} (${role.role}) with CV${res.applied_cv || cv}.`);
       })
-      .catch((err) => {
-        toast.error(`Apply failed on ${role.company}: ${err?.message || String(err)}`);
-        handleRefresh();
+      .catch((err: unknown) => {
+        const failure = reportErpFailure(err);
+        // A dead session means the optimistic UI is now a lie — reload truth.
+        toast.error(`Apply failed on ${role.company}: ${failure.detail}`);
+        void handleRefresh();
       });
   };
 
@@ -764,9 +948,10 @@ export const App: React.FC = () => {
             ? `Switched ${role.company} to CV${newCv}. Click Undo to revert.`
             : `Reverted ${role.company} back to CV${newCv}.`
         );
-      } catch (err: any) {
-        toast.error(`Switch failed on ${role.company}: ${err?.message || String(err)}`);
-        handleRefresh();
+      } catch (err: unknown) {
+        const failure = reportErpFailure(err);
+        toast.error(`Switch failed on ${role.company}: ${failure.detail}`);
+        void handleRefresh();
       }
     })();
   };
@@ -793,9 +978,10 @@ export const App: React.FC = () => {
         saveAppliedCvMap(nextMap);
         toast.success(`Cancelled application for ${role.company}.`);
       })
-      .catch((err) => {
-        toast.error(`Cancel failed on ${role.company}: ${err?.message || String(err)}`);
-        handleRefresh();
+      .catch((err: unknown) => {
+        const failure = reportErpFailure(err);
+        toast.error(`Cancel failed on ${role.company}: ${failure.detail}`);
+        void handleRefresh();
       });
   };
 
@@ -1066,6 +1252,15 @@ export const App: React.FC = () => {
 
       <ExtensionStatusBanner bridge={bridge} />
 
+      <SessionRecoveryBanner
+        failure={erpFailure}
+        busy={recovering || sendingOtp || verifyingOtp || readingGmailOtp}
+        onRecover={(action) => {
+          void handleRecoverErp(action);
+        }}
+        onDismiss={() => setErpFailure(null)}
+      />
+
       <OtpStrip
         authenticated={stage === "authenticated"}
         stage={stage}
@@ -1082,6 +1277,7 @@ export const App: React.FC = () => {
         gmailEmail={gmailAccount.email}
         suggestedOtp={suggestedOtp}
         bridgeReady={bridge.status === "connected"}
+        recovering={recovering}
         onSetupLogin={() => setLoginModalOpen(true)}
         onSendOtp={(opts) => {
           void handleSendOtp(opts);
@@ -1091,6 +1287,9 @@ export const App: React.FC = () => {
         }}
         onVerifyOtp={(otp) => {
           void handleVerifyOtp(otp);
+        }}
+        onResetSession={() => {
+          void handleRecoverErp("clean_login");
         }}
       />
 

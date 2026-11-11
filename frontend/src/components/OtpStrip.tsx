@@ -15,10 +15,14 @@ interface OtpStripProps {
   gmailEmail: string;
   suggestedOtp: string;
   bridgeReady: boolean;
+  /** True while a session reset / recovery round-trip is running. */
+  recovering?: boolean;
   onSetupLogin: () => void;
   onSendOtp: (opts?: { forceManual?: boolean }) => void;
   onRecheckGmail: () => void;
   onVerifyOtp: (otp: string) => void;
+  /** One-tap “start over”: clears ERP state and begins a clean login. */
+  onResetSession?: () => void;
 }
 
 export const OtpStrip: React.FC<OtpStripProps> = ({
@@ -35,10 +39,12 @@ export const OtpStrip: React.FC<OtpStripProps> = ({
   gmailEmail,
   suggestedOtp,
   bridgeReady,
+  recovering = false,
   onSetupLogin,
   onSendOtp,
   onRecheckGmail,
   onVerifyOtp,
+  onResetSession,
 }) => {
   const [otp, setOtp] = useState("");
   const [manualOverride, setManualOverride] = useState(false);
@@ -51,7 +57,7 @@ export const OtpStrip: React.FC<OtpStripProps> = ({
     return null;
   }
 
-  const busy = resumingSession || sendingOtp || readingGmailOtp || verifyingOtp;
+  const busy = resumingSession || sendingOtp || readingGmailOtp || verifyingOtp || recovering;
   const showManualForm =
     !gmailAutoReady ||
     manualOverride ||
@@ -65,6 +71,8 @@ export const OtpStrip: React.FC<OtpStripProps> = ({
 
   const statusText = resumingSession
     ? "Checking active ERP session…"
+    : recovering
+    ? "Starting a clean ERP session…"
     : !hasSavedLogin
     ? "Set up login once (roll number, security answers, and optional Gmail Auto-OTP)."
     : readingGmailOtp
@@ -177,13 +185,27 @@ export const OtpStrip: React.FC<OtpStripProps> = ({
             />
             <button
               type="submit"
-              disabled={!bridgeReady || verifyingOtp || resumingSession}
+              disabled={!bridgeReady || verifyingOtp || resumingSession || recovering}
               className="inline-flex items-center gap-1 rounded bg-amber-500 px-2.5 py-1 text-xs font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-50 cursor-pointer"
             >
               <Send className="h-3.5 w-3.5" />
               {verifyingOtp ? "Opening…" : "Open CDC"}
             </button>
           </form>
+        )}
+
+        {/* Escape hatch: always reachable, so a confused user is never stuck
+            with no idea what to do next. Only shown when there is saved login. */}
+        {hasSavedLogin && onResetSession && (
+          <button
+            type="button"
+            onClick={onResetSession}
+            disabled={!bridgeReady || busy}
+            title="Clears every ERP cookie and starts a completely fresh login. Use this if ERP seems stuck or logged in elsewhere."
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 hover:text-slate-900 disabled:opacity-50 cursor-pointer"
+          >
+            {recovering ? "Resetting…" : "Start over"}
+          </button>
         )}
       </div>
     </section>

@@ -19,6 +19,35 @@ import {
   parseNoticeRow,
   stripHtmlInline,
 } from "./erpParsers";
+import {
+  ErpFailureCode,
+  classifyErpMessage,
+  isAuthLandingUrl,
+  isStudentWorkspaceHtml,
+} from "./erpSessionGuard";
+
+/**
+ * Typed ERP failure. Carries a machine-readable code so the UI can always
+ * render the correct single recovery action instead of a raw stack string.
+ */
+export class ErpSessionError extends Error {
+  readonly code: ErpFailureCode;
+  constructor(code: ErpFailureCode, message: string) {
+    super(message);
+    this.name = "ErpSessionError";
+    this.code = code;
+  }
+}
+
+/** Wraps an arbitrary failure whose text we must classify at the boundary. */
+function asErpError(err: unknown, fallback: ErpFailureCode = "unknown"): ErpSessionError {
+  if (err instanceof ErpSessionError) return err;
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  if (!message.trim()) {
+    return new ErpSessionError(fallback, "ERP did not respond. Check your connection and retry.");
+  }
+  return new ErpSessionError(classifyErpMessage(message), message);
+}
 
 const ERP_HOST = "https://erp.iitkgp.ac.in";
 const SOURCE_PAGE = "ERP_CDC_PAGE";
@@ -463,10 +492,29 @@ class ClientErpRunner {
     return { ...this.state };
   }
 
+  /** Drops all in-memory ERP data and returns to a clean logged-out state. */
+  private resetToLoggedOut(): void {
+    this.jnfCache.clear();
+    this.comViewCache.clear();
+    this.cvPdfBase64Cache.clear();
+    this.attachmentBase64Cache.clear();
+    this.state = {
+      stage: "uninitialized",
+      rollno: "",
+      requestedUrl: `${ERP_HOST}/IIT_ERP3/home.htm`,
+      matchedQuestion: "",
+      matchedAnswer: "",
+    };
+  }
+
   /**
-   * Non-destructively probes whether Chrome already holds a valid ERP SSO session
-   * for the student. Never clears cookies or triggers an OTP. Returns null if
-   * logged out or if the active ERP cookie belongs to a different roll number.
+   * Non-destructively probes whether Chrome already holds a *verified working*
+   * ERP SSO session for the student. Never clears cookies or triggers an OTP.
+   *
+   * Returns null unless every step proves the session is genuinely usable:
+   * an auth landing page, an unauthenticated menu shell, or a non-workspace
+   * TPStudent.jsp all mean "not resumable". This is what stops the UI from
+   * claiming `authenticated` over a dead session with an empty grid.
    */
   async tryResumeSession(expectedRollno = ""): Promise<{
     rollno: string;
@@ -474,24 +522,29 @@ class ClientErpRunner {
     notices: PlacementNotice[];
   } | null> {
     const cleanExpected = expectedRollno.trim();
+    // Every "not resumable" exit must leave a *clean* logged-out state. A
+    // half-reset client is how the UI ended up showing `On` over an empty grid.
+    const giveUp = (): null => {
+      this.resetToLoggedOut();
+      return null;
+    };
     try {
       const { text: homeHtml, finalUrl } = await erpFetchText(`${ERP_HOST}/IIT_ERP3/`);
-      let homePath = finalUrl;
-      try {
-        homePath = new URL(finalUrl).pathname;
-      } catch {
-        homePath = finalUrl;
-      }
-      if (homePath.endsWith("login.htm") || homePath.endsWith("auth.htm")) {
-        return null;
+      if (isAuthLandingUrl(finalUrl)) {
+        return giveUp();
       }
 
       await this.openPlacementSession();
       const { text: tpHtml, finalUrl: tpUrl } = await erpFetchText(
         `${ERP_HOST}/TrainingPlacementSSO/TPStudent.jsp`
       );
-      if (tpUrl.includes("login.htm") || tpUrl.includes("auth.htm")) {
-        return null;
+      if (isAuthLandingUrl(tpUrl)) {
+        return giveUp();
+      }
+      // A real workspace page carries ERP student scaffolding; anything else
+      // is a login shell or an error page wearing a 200 status.
+      if (!isStudentWorkspaceHtml(tpHtml)) {
+        return giveUp();
       }
 
       const detectedRoll =
@@ -501,18 +554,27 @@ class ClientErpRunner {
         cleanExpected &&
         detectedRoll.toUpperCase() !== cleanExpected.toUpperCase()
       ) {
-        return null;
+        return giveUp();
       }
 
       const activeRoll = (detectedRoll || cleanExpected).trim();
       if (!activeRoll) {
-        return null;
+        return giveUp();
       }
 
-      const { text: payload } = await erpFetchText(
+      const { text: payload, finalUrl: gridUrl } = await erpFetchText(
         `${ERP_HOST}/TrainingPlacementSSO/ERPMonitoring.htm?action=fetchData&jqqueryid=37`
       );
-      const rows = parseJqgridXml(payload);
+      if (isAuthLandingUrl(gridUrl)) {
+        return giveUp();
+      }
+      let rows: string[][];
+      try {
+        rows = parseJqgridXml(payload);
+      } catch {
+        // Not a jqGrid document at all -> the session is not really open yet.
+        return giveUp();
+      }
       const now = new Date();
       const companies = rows.map((cells, idx) => {
         const parsed = parseCompanyRow(idx + 1, cells, now);
@@ -544,16 +606,31 @@ class ClientErpRunner {
         notices,
       };
     } catch {
-      return null;
+      return giveUp();
     }
   }
 
   /**
-   * ERP keeps separate servlet sessions. An existing Chrome login lands on
-   * home.htm instead of login.htm — so always logout + wipe cookies first.
+   * Drives ERP to a genuine, unauthenticated SSO login page before an OTP is
+   * requested. ERP keeps three independent servlet sessions plus a shared
+   * `ssoToken` cookie, so a partial cleanup can still land us on `home.htm`
+   * and make `getSecurityQues.htm` answer with a stale session's question —
+   * which is exactly how users end up with an OTP that never verifies.
+   *
+   * Escalation ladder (cheap -> thorough):
+   *   1. logout every context + clear cookies
+   *   2. repeat (leftover ssoToken/JSESSIONID can survive one pass)
+   *   3. one final pass after a short settle delay
+   *
+   * Never throws on ERP oddities; only fails if ERP simply refuses to show a
+   * login page after all passes, which is a real, explainable blocker.
    */
   private async ensureLoginLanding(): Promise<string> {
+    const settle = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     const attempt = async (): Promise<string> => {
+      // IIT_ERP3/logout.htm drops the main ERP session; CLEAR_COOKIES then
+      // removes every JSID_* / ssoToken cookie across all three contexts, which
+      // is what actually stops ERP reusing a half-dead session.
       await erpFetchText(`${ERP_HOST}/IIT_ERP3/logout.htm`).catch(() => undefined);
       await sendBridgeMessage("CLEAR_COOKIES").catch(() => undefined);
       const { finalUrl } = await erpFetchText(`${ERP_HOST}/IIT_ERP3/`);
@@ -561,16 +638,67 @@ class ClientErpRunner {
     };
 
     let finalUrl = await attempt();
-    if (finalUrl.includes("login.htm")) return finalUrl;
+    if (isAuthLandingUrl(finalUrl)) return finalUrl;
 
-    // Second pass: leftover ssoToken / JSESSIONID can still skip the login page.
     finalUrl = await attempt();
-    if (finalUrl.includes("login.htm")) return finalUrl;
+    if (isAuthLandingUrl(finalUrl)) return finalUrl;
 
-    throw new Error(
-      `ERP did not redirect to SSOAdministration/login.htm (got ${finalUrl}). ` +
-        "Open erp.iitkgp.ac.in in this Chrome profile, log out, reload the companion extension, then retry."
+    // Give ERP a moment to expire the server-side session before the last pass.
+    await settle(600);
+    finalUrl = await attempt();
+    if (isAuthLandingUrl(finalUrl)) return finalUrl;
+
+    throw new ErpSessionError(
+      "session_conflict",
+      `ERP kept reusing an existing session instead of showing its login page (got ${finalUrl}). ` +
+        "Use “Reset ERP session”, or open erp.iitkgp.ac.in in this Chrome profile, log out there, and retry."
     );
+  }
+
+  /**
+   * Public recovery entry point: forces a completely clean ERP state.
+   *
+   * Used by the recovery button and by automatic escalation when a login is
+   * blocked by a stale/conflicting session. Safe to call at any time — it never
+   * throws, and always leaves the client in a deterministic logged-out state.
+   */
+  async resetSession(): Promise<{ cleared: boolean }> {
+    this.resetToLoggedOut();
+    try {
+      await erpFetchText(`${ERP_HOST}/IIT_ERP3/logout.htm`);
+    } catch {
+      /* logout endpoint is best-effort */
+    }
+    let cleared = true;
+    try {
+      // Wiping cookies across every ERP context is the part that actually
+      // guarantees a clean start, so its failure is reported to the caller.
+      await sendBridgeMessage("CLEAR_COOKIES");
+    } catch {
+      cleared = false;
+    }
+    return { cleared };
+  }
+
+  /**
+   * Verifies the current session is still alive. Returns false (and quietly
+   * logs out locally) when ERP has dropped us, so stale UI can self-heal.
+   */
+  async isSessionAlive(): Promise<boolean> {
+    if (this.state.stage !== "authenticated") return false;
+    try {
+      const randId = Math.floor(1e14 + Math.random() * 9e14);
+      const { finalUrl } = await erpFetchText(
+        `${ERP_HOST}/IIT_ERP3/holdSession.htm?rand_id=${randId}`
+      );
+      if (isAuthLandingUrl(finalUrl)) {
+        this.resetToLoggedOut();
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async fetchAllSecurityQuestions(rollno: string): Promise<string[]> {
@@ -579,18 +707,28 @@ class ClientErpRunner {
       throw new Error("Invalid roll number");
     }
 
-    await this.ensureLoginLanding();
+    try {
+      await this.ensureLoginLanding();
+    } catch (err) {
+      throw asErpError(err, "session_conflict");
+    }
 
     const questions: string[] = [];
     const seen = new Set<string>();
 
     for (let i = 0; i < MAX_SECURITY_QUESTION_FETCH_TRIES; i++) {
       if (questions.length >= REQUIRED_SECURITY_QUESTIONS) break;
-      const { text } = await erpFetchText(
+      const { text, finalUrl } = await erpFetchText(
         `${ERP_HOST}/SSOAdministration/getSecurityQues.htm`,
         { user_id: roll },
         true
       );
+      if (isAuthLandingUrl(finalUrl)) {
+        throw new ErpSessionError(
+          "session_conflict",
+          "ERP dropped the login page while reading your security questions. Use “Reset ERP session” and try again."
+        );
+      }
       const question = normalizeQuestion(stripHtmlInline(text));
       if (!question || question.toUpperCase() === "FALSE") {
         throw new Error(
@@ -631,8 +769,33 @@ class ClientErpRunner {
       throw new Error("At least one usable security answer is required");
     }
 
-    const finalUrl = await this.ensureLoginLanding();
+    try {
+      return await this.sendOtpOnce(profile);
+    } catch (err) {
+      const failure = asErpError(err);
+      // Session-level causes are self-healing: purge everything and retry once
+      // so the user never sees this class of error at all.
+      if (failure.code !== "session_conflict" && failure.code !== "session_stale" && failure.code !== "auth_landing") {
+        throw failure;
+      }
+      await this.resetSession();
+      try {
+        return await this.sendOtpOnce(profile);
+      } catch (retryErr) {
+        throw asErpError(retryErr, "session_conflict");
+      }
+    }
+  }
 
+  private async sendOtpOnce(profile: LoginProfile): Promise<{
+    rollno: string;
+    question: string;
+    message: string;
+  }> {
+    const roll = profile.rollno.trim();
+    const password = profile.password;
+
+    const finalUrl = await this.ensureLoginLanding();
     try {
       const parsed = new URL(finalUrl);
       const reqUrl = parsed.searchParams.get("requestedUrl");
@@ -677,7 +840,7 @@ class ClientErpRunner {
       );
     }
 
-    const { text: otpBody } = await erpFetchText(
+    const { text: otpBody, finalUrl: otpUrl } = await erpFetchText(
       `${ERP_HOST}/SSOAdministration/getEmilOTP.htm`,
       {
         user_id: roll,
@@ -691,11 +854,21 @@ class ClientErpRunner {
       true
     );
 
+    if (isAuthLandingUrl(otpUrl)) {
+      throw new ErpSessionError(
+        "session_conflict",
+        "ERP closed the login page before sending the OTP. Resetting the ERP session and trying again."
+      );
+    }
+
     let payload: { msg?: string };
     try {
       payload = JSON.parse(otpBody);
     } catch {
-      throw new Error("ERP getEmilOTP.htm did not return valid JSON");
+      throw new ErpSessionError(
+        "session_conflict",
+        "ERP returned an unexpected page instead of an OTP confirmation. Resetting the ERP session and trying again."
+      );
     }
 
     const message = String(payload.msg || "").trim();
@@ -737,7 +910,10 @@ class ClientErpRunner {
       throw new Error("OTP cannot be empty");
     }
     if (this.state.stage !== "otp_sent" || !this.state.matchedAnswer) {
-      throw new Error("Please click 'Send OTP' first to initialize the login session");
+      throw new ErpSessionError(
+        "otp_required",
+        "This login attempt is no longer active. Tap ‘Send OTP’ to start a fresh login."
+      );
     }
 
     const { finalUrl } = await erpFetchText(`${ERP_HOST}/SSOAdministration/auth.htm`, {
@@ -750,16 +926,15 @@ class ClientErpRunner {
       email_otp: cleanOtp,
     });
 
-    let authPath = finalUrl;
-    try {
-      authPath = new URL(finalUrl).pathname;
-    } catch {
-      authPath = finalUrl;
-    }
-    const authRejected = authPath.endsWith("login.htm") || authPath.endsWith("auth.htm");
-    if (authRejected) {
-      throw new Error(
-        "Login stayed on the ERP login page — the OTP was invalid or expired. Send a new OTP and try again."
+    if (isAuthLandingUrl(finalUrl)) {
+      // ERP bounces back to the login shell for two very different reasons:
+      // a bad/expired OTP, or a session that another device invalidated.
+      // We cannot tell them apart here — so stay in `otp_sent`: the user can
+      // retype the code if it was merely mistyped, and the banner offers a
+      // one-tap fresh OTP if it really expired.
+      throw new ErpSessionError(
+        "otp_invalid",
+        "ERP did not accept that code. Check the newest 6-digit OTP, or send a fresh one — a login on another device can also cancel this attempt."
       );
     }
 
@@ -771,10 +946,15 @@ class ClientErpRunner {
     let notices: PlacementNotice[] = [];
     try {
       notices = await this.fetchNotices(100, true);
-    } catch {
+    } catch (err) {
+      // A dead session here is not a notice problem — surface it as auth.
+      if (err instanceof ErpSessionError && err.code === "auth_landing") throw err;
       try {
         notices = await this.fetchNotices(100, true);
-      } catch {
+      } catch (retryErr) {
+        if (retryErr instanceof ErpSessionError && retryErr.code === "auth_landing") {
+          throw retryErr;
+        }
         notices = [];
       }
     }
@@ -787,43 +967,89 @@ class ClientErpRunner {
   }
 
   async openPlacementSession(): Promise<void> {
-    const { text: page } = await erpFetchText(`${ERP_HOST}/IIT_ERP3/showmenu.htm`, {
-      module_id: "26",
-      menu_id: "11",
-      link: `${ERP_HOST}/TrainingPlacementSSO/TPStudent.jsp`,
-      module_name: "CDC",
-      parent_display_name: "Student",
-      display_name: "Application of Placement/Internship",
-    });
+    const { text: page, finalUrl: menuUrl } = await erpFetchText(
+      `${ERP_HOST}/IIT_ERP3/showmenu.htm`,
+      {
+        module_id: "26",
+        menu_id: "11",
+        link: `${ERP_HOST}/TrainingPlacementSSO/TPStudent.jsp`,
+        module_name: "CDC",
+        parent_display_name: "Student",
+        display_name: "Application of Placement/Internship",
+      }
+    );
+
+    if (isAuthLandingUrl(menuUrl)) {
+      throw new ErpSessionError(
+        "auth_landing",
+        "Your ERP session ended before CDC could open. Sign in again to continue."
+      );
+    }
 
     const ssoToken = extractHiddenInput(page, "ssoToken");
     if (!ssoToken) {
-      throw new Error("Menu launcher did not return an ssoToken for CDC Placement");
+      throw new ErpSessionError(
+        "session_conflict",
+        "ERP did not open CDC Placement. A stale session is usually the cause — use “Reset ERP session”, then sign in again."
+      );
     }
 
-    await erpFetchText(`${ERP_HOST}/TrainingPlacementSSO/TPStudent.jsp`, {
-      ssoToken,
-      module_id: "26",
-      menu_id: "11",
-    });
+    const { finalUrl: tpUrl } = await erpFetchText(
+      `${ERP_HOST}/TrainingPlacementSSO/TPStudent.jsp`,
+      {
+        ssoToken,
+        module_id: "26",
+        menu_id: "11",
+      }
+    );
+    if (isAuthLandingUrl(tpUrl)) {
+      throw new ErpSessionError(
+        "auth_landing",
+        "Your ERP session ended while opening CDC. Sign in again to continue."
+      );
+    }
   }
 
   async fetchCompanies(): Promise<CompanyRole[]> {
     return this.enqueueGridOp(async () => {
-      await erpFetchText(`${ERP_HOST}/TrainingPlacementSSO/TPStudent.jsp`);
-      let { text: payload } = await erpFetchText(
+      const primed = await erpFetchText(`${ERP_HOST}/TrainingPlacementSSO/TPStudent.jsp`);
+      if (isAuthLandingUrl(primed.finalUrl)) {
+        throw new ErpSessionError(
+          "auth_landing",
+          "Your ERP session ended. Sign in again to reload roles."
+        );
+      }
+      let { text: payload, finalUrl: gridUrl } = await erpFetchText(
         `${ERP_HOST}/TrainingPlacementSSO/ERPMonitoring.htm?action=fetchData&jqqueryid=37`
       );
+      if (isAuthLandingUrl(gridUrl)) {
+        throw new ErpSessionError(
+          "auth_landing",
+          "Your ERP session ended while loading roles. Sign in again to continue."
+        );
+      }
 
       let rows: string[][];
       try {
         rows = parseJqgridXml(payload);
       } catch {
         await this.openPlacementSession();
-        await erpFetchText(`${ERP_HOST}/TrainingPlacementSSO/TPStudent.jsp`);
+        const primed = await erpFetchText(`${ERP_HOST}/TrainingPlacementSSO/TPStudent.jsp`);
+        if (isAuthLandingUrl(primed.finalUrl)) {
+          throw new ErpSessionError(
+            "auth_landing",
+            "Your ERP session ended. Sign in again to reload roles."
+          );
+        }
         const retry = await erpFetchText(
           `${ERP_HOST}/TrainingPlacementSSO/ERPMonitoring.htm?action=fetchData&jqqueryid=37`
         );
+        if (isAuthLandingUrl(retry.finalUrl)) {
+          throw new ErpSessionError(
+            "auth_landing",
+            "Your ERP session ended while loading roles. Sign in again to continue."
+          );
+        }
         rows = parseJqgridXml(retry.text);
       }
 
@@ -842,11 +1068,23 @@ class ClientErpRunner {
   async fetchNotices(rows = 100, placementOnly = true): Promise<PlacementNotice[]> {
     return this.enqueueGridOp(async () => {
       const clamped = Math.max(1, Math.min(150, rows));
-      await erpFetchText(`${ERP_HOST}/TrainingPlacementSSO/Notice.jsp`);
+      const primed = await erpFetchText(`${ERP_HOST}/TrainingPlacementSSO/Notice.jsp`);
+      if (isAuthLandingUrl(primed.finalUrl)) {
+        throw new ErpSessionError(
+          "auth_landing",
+          "Your ERP session ended. Sign in again to reload notices."
+        );
+      }
       const epochMs = Date.now();
-      const { text: payload } = await erpFetchText(
+      const { text: payload, finalUrl } = await erpFetchText(
         `${ERP_HOST}/TrainingPlacementSSO/ERPMonitoring.htm?action=fetchData&jqqueryid=54&_search=false&nd=${epochMs}&rows=${clamped}&page=1&sidx=&sord=asc&totalrows=${clamped}`
       );
+      if (isAuthLandingUrl(finalUrl)) {
+        throw new ErpSessionError(
+          "auth_landing",
+          "Your ERP session ended while loading notices. Sign in again to continue."
+        );
+      }
       const parsed = parseJqgridXml(payload).map((cells, idx) => parseNoticeRow(idx + 1, cells));
       return placementOnly ? parsed.filter((n) => n.type.toUpperCase() === "PLACEMENT") : parsed;
     });
@@ -867,9 +1105,15 @@ class ClientErpRunner {
       com_id: cleanComId,
       user_type: "SU",
     });
-    const { text } = await erpFetchText(
+    const { text, finalUrl } = await erpFetchText(
       `${ERP_HOST}/TrainingPlacementSSO/TPComView.jsp?${params.toString()}`
     );
+    if (isAuthLandingUrl(finalUrl)) {
+      throw new ErpSessionError(
+        "auth_landing",
+        "Your ERP session ended. Sign in again to view company details."
+      );
+    }
     const parsed = parseComViewHtml(text);
     this.comViewCache.set(cacheKey, parsed);
     return parsed;
@@ -902,9 +1146,15 @@ class ClientErpRunner {
       user_type: "SU",
       rollno: this.state.rollno,
     });
-    const { text } = await erpFetchText(
+    const { text, finalUrl } = await erpFetchText(
       `${ERP_HOST}/TrainingPlacementSSO/TPJNFView.jsp?${params.toString()}`
     );
+    if (isAuthLandingUrl(finalUrl)) {
+      throw new ErpSessionError(
+        "auth_landing",
+        "Your ERP session ended. Sign in again to view this job description."
+      );
+    }
     const details = parseJnfHtml(text, cleanComId, cleanJnfId);
 
     if (includeExtended) {
@@ -979,9 +1229,15 @@ class ClientErpRunner {
       com_id,
       jnf_id,
     });
-    await erpFetchText(
+    const action = await erpFetchText(
       `${ERP_HOST}/TrainingPlacementSSO/TPJNFViewAction.jsp?${params.toString()}`
     );
+    if (isAuthLandingUrl(action.finalUrl)) {
+      throw new ErpSessionError(
+        "auth_landing",
+        "Your ERP session ended before the application was submitted. Sign in again and re-apply."
+      );
+    }
     const details = await this.fetchJnf(com_id, jnf_id, yop, true);
     const verified = details.is_applied;
     const applied_cv = details.applied_cv || (verified ? cv : null);
@@ -1000,9 +1256,15 @@ class ClientErpRunner {
       com_id,
       jnf_id,
     });
-    await erpFetchText(
+    const action = await erpFetchText(
       `${ERP_HOST}/TrainingPlacementSSO/TPStudenApply.jsp?${params.toString()}`
     );
+    if (isAuthLandingUrl(action.finalUrl)) {
+      throw new ErpSessionError(
+        "auth_landing",
+        "Your ERP session ended before the change was saved. Sign in again and retry."
+      );
+    }
     const details = await this.fetchJnf(com_id, jnf_id, yop, true);
     return { cancelled: !details.is_applied };
   }
@@ -1011,9 +1273,15 @@ class ClientErpRunner {
     if (this.cvPdfBase64Cache.has(cvNo)) {
       return this.cvPdfBase64Cache.get(cvNo)!;
     }
-    const { base64 } = await erpFetchBinary(
+    const { base64, finalUrl } = await erpFetchBinary(
       `${ERP_HOST}/TrainingPlacementSSO/cvGenerate.jsp?resume_no=${cvNo}`
     );
+    if (isAuthLandingUrl(finalUrl)) {
+      throw new ErpSessionError(
+        "auth_landing",
+        "Your ERP session ended. Sign in again to download your CV."
+      );
+    }
     if (!atob(base64).startsWith("%PDF")) {
       throw new Error(`CV${cvNo} download was not a valid PDF (ERP session may have expired).`);
     }
@@ -1139,27 +1407,30 @@ class ClientErpRunner {
   async keepalive(): Promise<void> {
     if (this.state.stage !== "authenticated") return;
     const randId = Math.floor(1e14 + Math.random() * 9e14);
-    await erpFetchText(`${ERP_HOST}/IIT_ERP3/holdSession.htm?rand_id=${randId}`);
+    const { finalUrl } = await erpFetchText(
+      `${ERP_HOST}/IIT_ERP3/holdSession.htm?rand_id=${randId}`
+    );
+    // A dropped session must never keep looking `authenticated` in the UI.
+    if (isAuthLandingUrl(finalUrl)) {
+      this.resetToLoggedOut();
+      throw new ErpSessionError(
+        "auth_landing",
+        "Your ERP session expired. Sign in again to keep working."
+      );
+    }
   }
 
   async logout(): Promise<void> {
     try {
-      await erpFetchText(`${ERP_HOST}/IIT_ERP3/logout.htm`);
+      await Promise.all([
+        erpFetchText(`${ERP_HOST}/IIT_ERP3/logout.htm`).catch(() => undefined),
+        erpFetchText(`${ERP_HOST}/SSOAdministration/logout.htm`).catch(() => undefined),
+      ]);
     } catch {
       /* ignore */
     }
     await sendBridgeMessage("CLEAR_COOKIES").catch(() => undefined);
-    this.jnfCache.clear();
-    this.comViewCache.clear();
-    this.cvPdfBase64Cache.clear();
-    this.attachmentBase64Cache.clear();
-    this.state = {
-      stage: "uninitialized",
-      rollno: "",
-      requestedUrl: `${ERP_HOST}/IIT_ERP3/home.htm`,
-      matchedQuestion: "",
-      matchedAnswer: "",
-    };
+    this.resetToLoggedOut();
   }
 }
 
