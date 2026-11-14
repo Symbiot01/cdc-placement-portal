@@ -94,6 +94,87 @@ async function clearErpCookies() {
   );
 }
 
+const RELEASE_ALARM = "cdc-release-erp";
+const portalPorts = new Set();
+let releaseInFlight = null;
+
+/**
+ * Drop the ERP server session. Keepalive fetches are started synchronously so
+ * they still reach ERP if the service worker is torn down with the tab.
+ * Cookies are cleared only after a logout response, so a failed attempt can retry.
+ */
+function releaseErpSession() {
+  if (releaseInFlight) return releaseInFlight;
+  if (portalPorts.size > 0) return Promise.resolve();
+  const urls = [
+    `${ERP_ORIGIN}/IIT_ERP3/logout.htm`,
+    `${ERP_ORIGIN}/SSOAdministration/logout.htm`,
+  ];
+  const requests = urls.map((url) =>
+    fetch(url, {
+      method: "GET",
+      credentials: "include",
+      keepalive: true,
+      cache: "no-store",
+      redirect: "follow",
+    }).then((resp) => resp.ok || (resp.status >= 200 && resp.status < 400)).catch(() => false)
+  );
+  releaseInFlight = (async () => {
+    try {
+      const results = await Promise.all(requests);
+      if (portalPorts.size > 0) return;
+      if (!results.some(Boolean)) {
+        chrome.alarms.create(RELEASE_ALARM, { delayInMinutes: 1 }).catch(() => undefined);
+        return;
+      }
+      chrome.alarms.clear(RELEASE_ALARM).catch(() => undefined);
+      await clearErpCookies();
+    } finally {
+      releaseInFlight = null;
+    }
+  })();
+  return releaseInFlight;
+}
+
+function releaseIfPortalTabClosed(tabId) {
+  if (portalPorts.size > 0) return;
+  const decide = (tabStillExists) => {
+    // A live tab id means refresh or in-tab navigation, not a close.
+    if (portalPorts.size > 0 || tabStillExists) return;
+    void releaseErpSession();
+  };
+  if (tabId == null) {
+    decide(false);
+    return;
+  }
+  chrome.tabs.get(tabId).then(
+    () => decide(true),
+    () => decide(false)
+  );
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (!port || port.name !== "cdc-portal") return;
+  try {
+    assertAllowedSender(port.sender);
+  } catch {
+    return;
+  }
+  portalPorts.add(port);
+  chrome.alarms.clear(RELEASE_ALARM).catch(() => undefined);
+  const tabId = port.sender && port.sender.tab ? port.sender.tab.id : null;
+  port.onDisconnect.addListener(() => {
+    portalPorts.delete(port);
+    releaseIfPortalTabClosed(tabId);
+  });
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (!alarm || alarm.name !== RELEASE_ALARM) return;
+  if (portalPorts.size > 0) return;
+  void releaseErpSession();
+});
+
 async function performErpFetch(payload) {
   const targetUrl = assertErpUrl(payload.url);
   const rawMethod = (payload.method || (payload.form ? "POST" : "GET")).toUpperCase();

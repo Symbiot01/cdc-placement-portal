@@ -12,16 +12,20 @@ import {
 
 describe("extension bridge version gate", () => {
   it("accepts the current bridge and rejects older builds", () => {
-    expect(isVersionAtLeast("1.0.4", "1.0.4")).toBe(true);
-    expect(isVersionAtLeast("1.0.10", "1.0.4")).toBe(true);
-    expect(isVersionAtLeast("1.0.3", "1.0.4")).toBe(false);
-    expect(isVersionAtLeast("1.0.2", "1.0.4")).toBe(false);
-    expect(isVersionAtLeast("not-a-version", "1.0.4")).toBe(false);
+    expect(isVersionAtLeast("1.0.5", "1.0.5")).toBe(true);
+    expect(isVersionAtLeast("1.0.10", "1.0.5")).toBe(true);
+    expect(isVersionAtLeast("1.0.4", "1.0.5")).toBe(false);
+    expect(isVersionAtLeast("1.0.3", "1.0.5")).toBe(false);
+    expect(isVersionAtLeast("not-a-version", "1.0.5")).toBe(false);
   });
 
   it("treats a current ping as connected and an older ping as outdated", () => {
-    expect(classifyBridgePing(true, "1.0.4")).toEqual({
+    expect(classifyBridgePing(true, "1.0.5")).toEqual({
       status: "connected",
+      version: "1.0.5",
+    });
+    expect(classifyBridgePing(true, "1.0.4")).toEqual({
+      status: "outdated",
       version: "1.0.4",
     });
     expect(classifyBridgePing(true, "1.0.2")).toEqual({

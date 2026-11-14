@@ -5,6 +5,39 @@
 
   window.document.documentElement.setAttribute("data-erp-cdc-bridge", BRIDGE_VERSION);
 
+  // Keep a port open for the life of this document. When the last portal tab
+  // actually closes, the service worker logs ERP out so the phone can sign in.
+  // A refresh keeps the tab id, so the worker does not treat it as a close.
+  let portalPort = null;
+  let documentUnloaded = false;
+  window.addEventListener(
+    "pagehide",
+    (event) => {
+      if (!event.persisted) documentUnloaded = true;
+    },
+    { capture: true }
+  );
+  window.addEventListener("pageshow", () => {
+    documentUnloaded = false;
+    connectPortalPort();
+  });
+
+  function connectPortalPort() {
+    if (documentUnloaded || portalPort) return;
+    try {
+      portalPort = chrome.runtime.connect({ name: "cdc-portal" });
+    } catch {
+      portalPort = null;
+      return;
+    }
+    portalPort.onDisconnect.addListener(() => {
+      portalPort = null;
+      if (documentUnloaded) return;
+      window.setTimeout(connectPortalPort, 200);
+    });
+  }
+  connectPortalPort();
+
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     const data = event.data;

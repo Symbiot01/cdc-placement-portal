@@ -55,7 +55,7 @@ const SOURCE_EXT = "ERP_CDC_EXT";
 
 export const ERP_EXTENSION_STORE_URL =
   "https://chromewebstore.google.com/detail/ibcippekdchapicjboimhoaipghjplfk";
-export const MIN_BRIDGE_VERSION = "1.0.4";
+export const MIN_BRIDGE_VERSION = "1.0.5";
 const BRIDGE_PROBE_TIMEOUT_MS = 2000;
 
 const ROLL_ATTR_RE =
