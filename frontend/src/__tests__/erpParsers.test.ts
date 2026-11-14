@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  CompanyRole,
   SecuritySlot,
+  categorizeCompanies,
   classifyDeadline,
   decideSecurityAnswer,
   doesNoticeMatchCompany,
@@ -18,6 +20,31 @@ import {
   parseNoticeRow,
   splitGluedUrl,
 } from "../lib/erpParsers";
+
+function stubRole(partial: Partial<CompanyRole> & Pick<CompanyRole, "n" | "company" | "applied" | "is_open">): CompanyRole {
+  return {
+    key: `${partial.n}`,
+    role: "Role",
+    ctc: "",
+    currency: "INR",
+    status: "",
+    deadline_start: "",
+    deadline: "",
+    seconds_remaining: null,
+    deadline_iso: null,
+    urgency: "unknown",
+    deadline_badge: "",
+    interview_status: "",
+    contract: "",
+    com_id: String(partial.n),
+    jnf_id: "1",
+    yop: "2026-2027",
+    has_com_doc: false,
+    has_ppt_doc: false,
+    has_jnf_doc: false,
+    ...partial,
+  };
+}
 
 describe("decideSecurityAnswer", () => {
   const baseSlots: SecuritySlot[] = [
@@ -282,6 +309,60 @@ describe("ERP XML & HTML parsers", () => {
     expect(doesNoticeMatchCompany("Accenture Japan", "Accenture Japan Ltd.")).toBe(true);
     expect(doesNoticeMatchCompany("CDC General", "Airbus India")).toBe(false);
     expect(doesNoticeMatchCompany("Google", "Microsoft India")).toBe(false);
+  });
+
+  it("sorts applied roles: still-open/changeable first, then by resume-closed date", () => {
+    const closedOld = stubRole({
+      n: 1,
+      company: "ClosedOld",
+      applied: true,
+      is_open: false,
+      seconds_remaining: -7 * 86400,
+    });
+    const openSoon = stubRole({
+      n: 2,
+      company: "OpenSoon",
+      applied: true,
+      is_open: true,
+      seconds_remaining: 3600,
+    });
+    const closedRecent = stubRole({
+      n: 3,
+      company: "ClosedRecent",
+      applied: true,
+      is_open: false,
+      seconds_remaining: -3600,
+    });
+    const openLater = stubRole({
+      n: 4,
+      company: "OpenLater",
+      applied: true,
+      is_open: true,
+      seconds_remaining: 2 * 86400,
+    });
+    const unappliedOpen = stubRole({
+      n: 5,
+      company: "UnappliedOpen",
+      applied: false,
+      is_open: true,
+      seconds_remaining: 100,
+    });
+
+    const { applied, unapplied_open } = categorizeCompanies([
+      closedOld,
+      openSoon,
+      closedRecent,
+      openLater,
+      unappliedOpen,
+    ]);
+
+    expect(applied.map((r) => r.company)).toEqual([
+      "OpenSoon",
+      "OpenLater",
+      "ClosedRecent",
+      "ClosedOld",
+    ]);
+    expect(unapplied_open.map((r) => r.company)).toEqual(["UnappliedOpen"]);
   });
 
   it("parses TPJNFView multi-column headers, separates Allowed Departments, and parses JnfMoreDet & TPComView", () => {

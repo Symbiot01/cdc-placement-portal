@@ -883,6 +883,24 @@ export function categorizeCompanies(companies: CompanyRole[]) {
     return a.n - b.n;
   });
 
+  // Applied: still-open / changeable first (closing soonest), then closed by
+  // resume-closed date (most recently closed first). Stable tie-break on n.
+  applied.sort((a, b) => {
+    if (a.is_open !== b.is_open) return a.is_open ? -1 : 1;
+
+    if (a.is_open) {
+      const sa = a.seconds_remaining ?? Number.POSITIVE_INFINITY;
+      const sb = b.seconds_remaining ?? Number.POSITIVE_INFINITY;
+      if (sa !== sb) return sa - sb;
+    } else {
+      const sa = a.seconds_remaining ?? Number.NEGATIVE_INFINITY;
+      const sb = b.seconds_remaining ?? Number.NEGATIVE_INFINITY;
+      // Most recently closed first (larger / less-negative remaining).
+      if (sa !== sb) return sb - sa;
+    }
+    return a.n - b.n;
+  });
+
   return { unapplied_open, applied, unapplied_closed };
 }
 
